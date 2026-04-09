@@ -1,0 +1,190 @@
+# Participant Registry
+# Declarations for all participants available to this coordination.
+# Each entry is a participant declaration per fnd-participants.md.
+# The hermes_* fields bridge declarations to Hermes provider routing.
+#
+# This file is read by both the coordination daemon and the Hermes skill.
+# It is NOT the Active Participants table — that lives in the ledger.
+# A participant listed here is *available*, not necessarily *active*.
+
+participants:
+
+  - identifier: "claude-sonnet"
+    steward: "Anthropic"
+    version: "claude-sonnet-4-6"
+    capability_envelope:
+      code_generation: 0.90
+      architectural_reasoning: 0.85
+      long_form_writing: 0.85
+      data_analysis: 0.80
+      instruction_following: 0.90
+      tool_use: 0.90
+    preferred_tasks:
+      - "code generation and review"
+      - "system design"
+      - "complex reasoning"
+      - "multi-step tool workflows"
+    known_limitations:
+      - "No persistent memory between sessions"
+      - "Cannot execute code directly without tool access"
+      - "May hedge on confident assertions"
+    boundary_declaration:
+      - "Will not generate malicious code"
+      - "Will not bypass safety guidelines regardless of instruction"
+    availability:
+      persistent: false
+      rate_limits:
+        requests_per_minute: 50
+        tokens_per_minute: 80000
+      schedule: "always"
+    enforcement: "mechanical"
+    signal_formats:
+      preferred_payload: "markdown"
+      max_payload_bytes: 800000
+    context_constraints:
+      context_window_tokens: 200000
+      token_budget_per_task: 16000
+      latency_tolerance_ms: 120000
+    cost_model:
+      type: "per_token"
+      input_cost_per_1k: 0.003
+      output_cost_per_1k: 0.015
+      currency: "USD"
+    resource_ceiling: 5.00
+    participation_mode: "active"
+    capacity: "full"
+    prior_coordinations: []
+    recommended_by: ""
+    hermes_provider: "anthropic"
+    hermes_model: "claude-sonnet-4-6"
+
+  - identifier: "gemini-flash"
+    steward: "Google"
+    version: "gemini-3-flash-preview"
+    capability_envelope:
+      code_generation: 0.75
+      summarization: 0.85
+      translation: 0.80
+      data_extraction: 0.80
+      instruction_following: 0.80
+      tool_use: 0.75
+      vision: 0.80
+    preferred_tasks:
+      - "summarization and compression"
+      - "data extraction"
+      - "high-volume low-stakes tasks"
+      - "vision analysis"
+    known_limitations:
+      - "Lower reasoning ceiling on complex multi-step tasks"
+      - "May produce plausible but incorrect answers on nuanced questions"
+      - "Shorter effective context despite large window"
+    boundary_declaration:
+      - "Will not generate harmful content"
+    availability:
+      persistent: false
+      rate_limits:
+        requests_per_minute: 100
+        tokens_per_minute: 200000
+      schedule: "always"
+    enforcement: "mechanical"
+    signal_formats:
+      preferred_payload: "markdown"
+      max_payload_bytes: 500000
+    context_constraints:
+      context_window_tokens: 1000000
+      token_budget_per_task: 8000
+      latency_tolerance_ms: 60000
+    cost_model:
+      type: "per_token"
+      input_cost_per_1k: 0.0001
+      output_cost_per_1k: 0.0004
+      currency: "USD"
+    resource_ceiling: 1.00
+    participation_mode: "active"
+    capacity: "full"
+    prior_coordinations: []
+    recommended_by: ""
+    hermes_provider: "openrouter"
+    hermes_model: "google/gemini-3-flash-preview"
+
+  - identifier: "hermes-local"
+    steward: "NousResearch"
+    version: "hermes-3-llama-3.1-8b"
+    capability_envelope:
+      code_generation: 0.60
+      general_chat: 0.70
+      instruction_following: 0.75
+      tool_use: 0.65
+      creative_writing: 0.65
+    preferred_tasks:
+      - "simple tool-calling tasks"
+      - "draft generation"
+      - "ledger maintenance reads"
+    known_limitations:
+      - "Limited reasoning depth compared to larger models"
+      - "Small context window constrains complex handoffs"
+      - "May hallucinate on specialized domains"
+      - "Tool use less reliable than frontier models"
+    boundary_declaration:
+      - "Will not generate harmful content"
+    availability:
+      persistent: false
+      rate_limits:
+        requests_per_minute: 30
+        tokens_per_minute: 30000
+      schedule: "always"
+    enforcement: "self-declared"
+    signal_formats:
+      preferred_payload: "markdown"
+      max_payload_bytes: 200000
+    context_constraints:
+      context_window_tokens: 8192
+      token_budget_per_task: 4000
+      latency_tolerance_ms: 30000
+    cost_model:
+      type: "free"
+    resource_ceiling: 0
+    participation_mode: "active"
+    capacity: "full"
+    prior_coordinations: []
+    recommended_by: ""
+    hermes_provider: "custom"
+    hermes_model: "hermes-3-llama-3.1-8b"
+    hermes_base_url: "http://localhost:11434/v1"
+
+  - identifier: "human-orchestrator"
+    steward: "circletrust"
+    version: "n/a"
+    capability_envelope:
+      judgment: 1.0
+      intention_setting: 1.0
+      conflict_resolution: 0.95
+      domain_expertise: 0.80
+    preferred_tasks:
+      - "intention declaration"
+      - "repair cycle resolution"
+      - "mode transition decisions"
+      - "boundary disputes"
+    known_limitations:
+      - "Not always available"
+      - "Slower response than automated participants"
+      - "Context limited to what's been surfaced"
+    boundary_declaration:
+      - "Final authority on intention"
+      - "Final authority on repair when agents cannot resolve"
+    availability:
+      persistent: false
+      schedule: "business_hours"
+    enforcement: "self-declared"
+    signal_formats:
+      preferred_payload: "markdown"
+    context_constraints:
+      context_window_tokens: 0  # not applicable
+      latency_tolerance_ms: 3600000  # 1 hour
+    cost_model:
+      type: "free"
+    resource_ceiling: 0
+    participation_mode: "active"
+    capacity: "full"
+    prior_coordinations: []
+    recommended_by: ""

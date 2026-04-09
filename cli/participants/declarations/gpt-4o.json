@@ -1,0 +1,47 @@
+{
+  "identifier": "gpt-4o",
+  "steward": "OpenAI",
+  "version": "gpt-4o-2024-11-20",
+  "litellm_model": "openai/gpt-4o",
+  "capability_envelope": {
+    "code_review": 0.75,
+    "security_analysis": 0.65,
+    "architectural_reasoning": 0.70,
+    "writing_review": 0.85,
+    "project_planning": 0.70
+  },
+  "preferred_tasks": ["writing_review", "deliverable_quality", "completeness_check"],
+  "known_limitations": [
+    "Smaller context window limits review of very long deliverables",
+    "Less detailed on low-level implementation correctness than reviewers tuned for code",
+    "Cannot execute code to verify runtime behavior"
+  ],
+  "boundary_declaration": [
+    "Will not approve deliverables — review only",
+    "Will not make financial or legal judgments",
+    "Will not write to scope/ artifacts directly"
+  ],
+  "availability": "on-demand, API-based, standard tier rate limits",
+  "signal_formats": {
+    "preferred_input": "markdown with clearly labeled sections",
+    "preferred_output": "structured JSON with markdown detail field",
+    "max_payload_size_tokens": 110000
+  },
+  "context_constraints": {
+    "context_window": 128000,
+    "token_budget_per_task": 8000,
+    "latency_tolerance_seconds": 120
+  },
+  "cost_model": {
+    "type": "per_token",
+    "input_cost_per_million": 2.5,
+    "output_cost_per_million": 10.0,
+    "currency": "USD"
+  },
+  "resource_ceiling": {
+    "max_tokens_per_session": 400000,
+    "max_cost_per_session_usd": 8.0
+  },
+  "participation_mode": "active",
+  "capacity": "full"
+}

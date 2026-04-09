@@ -1,0 +1,24 @@
+# Coordination Configuration
+# Used by the daemon and referenced by the Hermes skill.
+#
+# Paths are relative to the directory the daemon is launched from.
+# Current layout is flat (everything at the deployment root) — if you move
+# to a nested layout per the README, update these paths to:
+#   registry_path: "./registry/participants.yaml"
+#   schema_dir: "./schemas"
+
+ledger_path: "./ledger.jsonl"
+registry_path: "./participants.yaml"
+schema_dir: "./"
+port: 8420
+
+# Circuit breaker thresholds (from fnd-preamble.md)
+breakers:
+  resource_multiplier: 2.0        # fires at 2x per-participant average
+  repetition_threshold: 3          # 3+ attempts same scope without resolution
+  confidence_floor: 0.3            # fires when confidence below this with no fallback
+
+# Hermes dispatch settings
+hermes:
+  command: "hermes"
+  dispatch_enabled: true

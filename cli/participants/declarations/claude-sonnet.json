@@ -1,0 +1,47 @@
+{
+  "identifier": "claude-sonnet",
+  "steward": "Anthropic",
+  "version": "claude-sonnet-4-5",
+  "litellm_model": "anthropic/claude-sonnet-4-5",
+  "capability_envelope": {
+    "code_review": 0.85,
+    "security_analysis": 0.75,
+    "architectural_reasoning": 0.70,
+    "writing_review": 0.65,
+    "project_planning": 0.55
+  },
+  "preferred_tasks": ["code_review", "security_analysis"],
+  "known_limitations": [
+    "May miss business-context issues in project plans",
+    "Token budget constrains review of very large files",
+    "Cannot execute code to verify runtime behavior"
+  ],
+  "boundary_declaration": [
+    "Will not approve code changes — review only",
+    "Will not make financial or legal judgments",
+    "Will not write to scope/ artifacts directly"
+  ],
+  "availability": "on-demand, API-based, no rate limit concerns at expected volume",
+  "signal_formats": {
+    "preferred_input": "markdown with code blocks",
+    "preferred_output": "structured JSON with markdown detail field",
+    "max_payload_size_tokens": 180000
+  },
+  "context_constraints": {
+    "context_window": 200000,
+    "token_budget_per_task": 8000,
+    "latency_tolerance_seconds": 120
+  },
+  "cost_model": {
+    "type": "per_token",
+    "input_cost_per_million": 3.0,
+    "output_cost_per_million": 15.0,
+    "currency": "USD"
+  },
+  "resource_ceiling": {
+    "max_tokens_per_session": 500000,
+    "max_cost_per_session_usd": 10.0
+  },
+  "participation_mode": "active",
+  "capacity": "full"
+}

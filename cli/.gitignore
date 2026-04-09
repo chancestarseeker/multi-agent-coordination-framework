@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+
+# Pending signals are transient transport state, not durable truth.
+# Once processed, they move to signal/archive/ which IS git-tracked
+# so the lineage chain survives across sessions (per fnd-signal.md).
+signal/inbox/

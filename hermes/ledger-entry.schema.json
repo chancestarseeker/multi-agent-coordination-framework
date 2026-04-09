@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Coordination Ledger Entry",
+  "description": "Schema for a single append-only entry in the coordination ledger. Derived from fnd-ledger.md.",
+  "type": "object",
+  "required": [
+    "entry_id",
+    "timestamp",
+    "author",
+    "type",
+    "scope",
+    "prior_entries",
+    "summary",
+    "confidence",
+    "foundation_tag"
+  ],
+  "properties": {
+    "entry_id": {
+      "type": "string",
+      "description": "Unique identifier. Format: {author}-{timestamp_epoch_ms}-{short_random}",
+      "pattern": "^[a-zA-Z0-9._-]+-[0-9]+-[a-z0-9]{6}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when entry was proposed."
+    },
+    "author": {
+      "type": "string",
+      "description": "Identifier of the participant proposing this entry. Must match a declared participant."
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "decision",
+        "attempt",
+        "completion",
+        "failure",
+        "repair",
+        "boundary_change",
+        "intention_shift"
+      ],
+      "description": "What state transition this entry records."
+    },
+    "scope": {
+      "type": "string",
+      "description": "The artifact, task, or coordination area this entry concerns."
+    },
+    "prior_entries": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Entry IDs this one depends on or responds to. Empty array for root entries."
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 500,
+      "description": "1-3 sentences: what happened and why it matters. A new participant should orient from this alone."
+    },
+    "detail": {
+      "type": "string",
+      "description": "Full context — reasoning, alternatives considered, constraints. May be omitted from summaries."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Author's honest estimate of this entry's reliability."
+    },
+    "foundation_tag": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["choice", "boundaries", "truth", "balance", "recursion", "intention"]
+      },
+      "description": "Which foundations are relevant. Used for diagnosis when circuit breakers fire."
+    },
+    "signal_envelope": {
+      "type": "object",
+      "description": "Optional. The signal that triggered this entry, preserved for lineage tracing.",
+      "properties": {
+        "origin": { "type": "string" },
+        "destination": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": ["handoff", "state_update", "boundary_change", "query", "acknowledgment", "error"]
+        },
+        "context_summary": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "lineage": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "task_response": {
+      "type": "object",
+      "description": "Present when this entry records a task acceptance or refusal.",
+      "properties": {
+        "response": {
+          "type": "string",
+          "enum": ["accept", "accept-with-conditions", "refuse-with-reason"]
+        },
+        "conditions": { "type": "string" },
+        "refusal_reason": { "type": "string" },
+        "suggested_participant": {
+          "type": "string",
+          "description": "On refusal: what kind of participant might succeed."
+        }
+      },
+      "required": ["response"]
+    },
+    "resource_snapshot": {
+      "type": "object",
+      "description": "Resource state at time of entry. Feeds Balance tracking.",
+      "properties": {
+        "tokens_used": { "type": "integer" },
+        "cost_usd": { "type": "number" },
+        "context_utilization": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Fraction of context window consumed."
+        },
+        "elapsed_ms": { "type": "integer" }
+      }
+    }
+  },
+  "additionalProperties": false
+}

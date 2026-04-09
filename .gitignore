@@ -1,0 +1,18 @@
+# Runtime ledger data — created by the CLI on first command, append-only
+# at runtime, not source. Each entry is a discrete state change but the
+# durability comes from the file system, not from git tracking.
+cli/ledger/
+
+# Pending signals are transient transport state. Archived signals are
+# kept by the cli per-instance and gitignored too — the canonical record
+# is the ledger entries the signals produced.
+cli/signal/
+hermes/ledger.jsonl
+
+# Standard Python and editor noise
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store

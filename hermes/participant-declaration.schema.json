@@ -1,0 +1,152 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Participant Declaration",
+  "description": "Schema for a participant's declaration. Derived from fnd-participants.md.",
+  "type": "object",
+  "required": [
+    "identifier",
+    "steward",
+    "version",
+    "capability_envelope",
+    "known_limitations",
+    "boundary_declaration",
+    "availability",
+    "enforcement",
+    "context_constraints",
+    "cost_model",
+    "participation_mode"
+  ],
+  "properties": {
+    "identifier": {
+      "type": "string",
+      "description": "Unique stable name within the coordination."
+    },
+    "steward": {
+      "type": "string",
+      "description": "Who maintains or is responsible for this participant."
+    },
+    "version": {
+      "type": "string",
+      "description": "Specific model version, build, or release."
+    },
+    "capability_envelope": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0.0,
+        "maximum": 1.0
+      },
+      "description": "Capabilities with confidence ranges. Keys are capability names, values are confidence."
+    },
+    "preferred_tasks": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Task types this participant does best. Signal for routing, not constraint."
+    },
+    "known_limitations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Specific weaknesses, failure patterns. Most valuable field in the declaration."
+    },
+    "boundary_declaration": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Hard limits. Honored absolutely. Coordination never routes around these."
+    },
+    "availability": {
+      "type": "object",
+      "properties": {
+        "persistent": {
+          "type": "boolean",
+          "description": "Whether participant persists between sessions."
+        },
+        "rate_limits": {
+          "type": "object",
+          "properties": {
+            "requests_per_minute": { "type": "integer" },
+            "tokens_per_minute": { "type": "integer" }
+          }
+        },
+        "schedule": {
+          "type": "string",
+          "description": "When available. 'always' for API-backed models."
+        }
+      },
+      "required": ["persistent"]
+    },
+    "enforcement": {
+      "type": "string",
+      "enum": ["mechanical", "self-declared"],
+      "description": "Whether boundaries are enforced by runtime or by participant commitment."
+    },
+    "signal_formats": {
+      "type": "object",
+      "properties": {
+        "preferred_payload": {
+          "type": "string",
+          "enum": ["json", "markdown", "plain_text", "code"]
+        },
+        "max_payload_bytes": { "type": "integer" }
+      }
+    },
+    "context_constraints": {
+      "type": "object",
+      "properties": {
+        "context_window_tokens": { "type": "integer" },
+        "token_budget_per_task": { "type": "integer" },
+        "latency_tolerance_ms": {
+          "type": "integer",
+          "description": "Timeout circuit breaker uses this as threshold."
+        }
+      },
+      "required": ["context_window_tokens", "latency_tolerance_ms"]
+    },
+    "cost_model": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["per_token", "flat_rate", "free", "variable"]
+        },
+        "input_cost_per_1k": { "type": "number" },
+        "output_cost_per_1k": { "type": "number" },
+        "currency": { "type": "string", "default": "USD" }
+      },
+      "required": ["type"]
+    },
+    "resource_ceiling": {
+      "type": "number",
+      "description": "Max USD expenditure per coordination session."
+    },
+    "participation_mode": {
+      "type": "string",
+      "enum": ["active", "observer"]
+    },
+    "capacity": {
+      "type": "string",
+      "enum": ["full", "reduced"],
+      "description": "Current capacity. Only applicable when participation_mode is active."
+    },
+    "prior_coordinations": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "recommended_by": {
+      "type": "string",
+      "description": "Who recommended this participant. Empty for self-proposals."
+    },
+    "hermes_provider": {
+      "type": "string",
+      "description": "Hermes provider key for routing (e.g., 'anthropic', 'openrouter', 'custom')."
+    },
+    "hermes_model": {
+      "type": "string",
+      "description": "Hermes model string (e.g., 'claude-sonnet-4-6', 'google/gemini-3-flash-preview')."
+    },
+    "hermes_base_url": {
+      "type": "string",
+      "description": "Custom endpoint URL if provider is 'custom'."
+    }
+  },
+  "additionalProperties": false
+}

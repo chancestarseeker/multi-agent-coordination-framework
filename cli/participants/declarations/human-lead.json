@@ -1,0 +1,39 @@
+{
+  "identifier": "human-lead",
+  "steward": "self",
+  "version": "human-1",
+  "litellm_model": null,
+  "capability_envelope": {
+    "intention_setting": 1.0,
+    "final_judgment": 1.0,
+    "repair_escalation": 1.0
+  },
+  "preferred_tasks": ["intention", "final_review", "repair_escalation"],
+  "known_limitations": [
+    "Available only intermittently",
+    "Will not perform line-by-line code review at the volume an LLM can"
+  ],
+  "boundary_declaration": [
+    "Sets coordination intention",
+    "Final acceptance authority",
+    "May override any agent decision but will not override a refusal"
+  ],
+  "availability": "intermittent — async, responds when present",
+  "signal_formats": {
+    "preferred_input": "rich CLI summaries or markdown",
+    "preferred_output": "freeform markdown",
+    "max_payload_size_tokens": null
+  },
+  "context_constraints": {
+    "context_window": null,
+    "token_budget_per_task": null,
+    "latency_tolerance_seconds": 86400
+  },
+  "cost_model": {
+    "type": "human_time",
+    "currency": "USD"
+  },
+  "resource_ceiling": null,
+  "participation_mode": "observer",
+  "capacity": "full"
+}
