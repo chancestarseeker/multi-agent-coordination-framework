@@ -196,6 +196,49 @@ can't reach the parent `foundations/`, you'll need to either copy the
 files in or modify the reference path in `cli/orchestrator.py`'s
 `FND_DIR` and `hermes/CLAUDE.md`.
 
+## Installing this as a Claude Code skill
+
+This repository is structured as a self-contained Claude Code skill —
+the top-level `SKILL.md` has the YAML frontmatter (`name`, `description`)
+that Claude Code expects, and all referenced files are inside the
+directory. To install it into any project:
+
+```bash
+# 1. Get this directory into your target project's .claude/skills/
+cd /path/to/your/project
+mkdir -p .claude/skills
+cp -r /path/to/agent-coordination .claude/skills/
+
+# 2. CRITICAL: remove the inner .git directory before staging.
+#    The agent-coordination directory ships with its own git history;
+#    if you don't remove it, your project's git will treat it as a
+#    submodule and skip the contents.
+rm -rf .claude/skills/agent-coordination/.git
+
+# 3. Verify the layout — should show foundations/, cli/, hermes/, plus
+#    SKILL.md and README.md at the top
+ls .claude/skills/agent-coordination/
+
+# 4. Stage and commit
+git add .claude/skills/agent-coordination
+git status   # confirm ~29 files added, nothing else touched
+git commit -m "Add agent-coordination skill"
+
+# 5. Push
+git push
+```
+
+After the push, Claude Code in that project will load `SKILL.md` when
+the skill is invoked. Users can also browse to
+`.claude/skills/agent-coordination/` on GitHub and the top-level
+`README.md` (this file) will render automatically.
+
+**To verify the skill is working** in a Claude Code session inside the
+target project, you can ask Claude to "load the agent-coordination skill"
+or to "review some code using the multi-agent coordination framework" —
+Claude will load `SKILL.md`, which directs it to load
+`foundations/fnd-preamble.md` first, then proceed from there.
+
 ## Acknowledgments
 
 The framework specification (the seven `fnd-*.md` files) is the result of
