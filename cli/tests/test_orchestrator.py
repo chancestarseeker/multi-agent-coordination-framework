@@ -17,6 +17,13 @@ import pytest
 
 # Import from the decomposed modules
 from cli.schema import LedgerEntry, SignalEnvelope, VALID_ENTRY_TYPES, VALID_SIGNAL_TYPES
+from cli.resolution import (
+    scope_is_resolved,
+    active_objections_for_scope,
+    open_conflict_breakers_for_scope,
+    has_verdict_for_scope,
+    validate_resolution,
+)
 from cli.config import resolve_scope
 from cli.parsing import extract_all_json, extract_json, classify_json_object
 from cli.review import route_participants, infer_task_type
@@ -573,3 +580,241 @@ class TestHandleAcknowledgment:
         assert entry is not None
         assert entry.type == "decision"
         assert "refused" in entry.summary.lower()
+
+
+# ---------- Schema: new entry types ----------
+
+
+class TestNewEntryTypes:
+    def test_resolution_type_valid(self):
+        e = LedgerEntry(**_make_entry(type="resolution"))
+        assert e.type == "resolution"
+
+    def test_objection_type_valid(self):
+        e = LedgerEntry(**_make_entry(type="objection"))
+        assert e.type == "objection"
+
+    def test_withdrawal_type_valid(self):
+        e = LedgerEntry(**_make_entry(type="withdrawal"))
+        assert e.type == "withdrawal"
+
+    def test_reopen_type_valid(self):
+        e = LedgerEntry(**_make_entry(type="reopen"))
+        assert e.type == "reopen"
+
+
+# ---------- Scope resolution lifecycle ----------
+
+
+class TestScopeIsResolved:
+    def test_empty_scope_not_resolved(self):
+        assert scope_is_resolved([]) == (False, None)
+
+    def test_resolved_after_resolution_entry(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+            LedgerEntry(**_make_entry(entry_id="002", type="resolution")),
+        ]
+        is_resolved, entry = scope_is_resolved(entries)
+        assert is_resolved is True
+        assert entry.entry_id == "002"
+
+    def test_not_resolved_after_reopen(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+            LedgerEntry(**_make_entry(entry_id="002", type="resolution")),
+            LedgerEntry(**_make_entry(entry_id="003", type="reopen", prior_entries=["002"])),
+        ]
+        is_resolved, _ = scope_is_resolved(entries)
+        assert is_resolved is False
+
+    def test_re_resolved_after_reopen_and_new_resolution(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+            LedgerEntry(**_make_entry(entry_id="002", type="resolution")),
+            LedgerEntry(**_make_entry(entry_id="003", type="reopen", prior_entries=["002"])),
+            LedgerEntry(**_make_entry(entry_id="004", type="resolution")),
+        ]
+        is_resolved, entry = scope_is_resolved(entries)
+        assert is_resolved is True
+        assert entry.entry_id == "004"
+
+
+class TestActiveObjections:
+    def test_no_objections(self):
+        entries = [LedgerEntry(**_make_entry(entry_id="001", type="completion"))]
+        assert active_objections_for_scope(entries) == []
+
+    def test_active_objection(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="objection", author="alice")),
+        ]
+        active = active_objections_for_scope(entries)
+        assert len(active) == 1
+        assert active[0].entry_id == "001"
+
+    def test_objection_cleared_by_withdrawal(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="objection", author="alice")),
+            LedgerEntry(**_make_entry(
+                entry_id="002", type="withdrawal", author="alice",
+                prior_entries=["001"],
+            )),
+        ]
+        assert active_objections_for_scope(entries) == []
+
+    def test_withdrawal_by_different_author_does_not_clear(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="objection", author="alice")),
+            LedgerEntry(**_make_entry(
+                entry_id="002", type="withdrawal", author="bob",
+                prior_entries=["001"],
+            )),
+        ]
+        active = active_objections_for_scope(entries)
+        assert len(active) == 1
+
+    def test_objection_cleared_by_repair(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="objection", author="alice")),
+            LedgerEntry(**_make_entry(
+                entry_id="002", type="repair", author="arbiter",
+                prior_entries=["001"],
+            )),
+        ]
+        assert active_objections_for_scope(entries) == []
+
+
+class TestOpenConflictBreakers:
+    def test_no_failures(self):
+        entries = [LedgerEntry(**_make_entry(entry_id="001", type="completion"))]
+        assert open_conflict_breakers_for_scope(entries) == []
+
+    def test_open_failure(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="failure")),
+        ]
+        open_conflicts = open_conflict_breakers_for_scope(entries)
+        assert len(open_conflicts) == 1
+
+    def test_failure_closed_by_repair(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="failure")),
+            LedgerEntry(**_make_entry(
+                entry_id="002", type="repair", prior_entries=["001"],
+            )),
+        ]
+        assert open_conflict_breakers_for_scope(entries) == []
+
+
+class TestHasVerdictForScope:
+    def test_no_verdicts(self):
+        entries = [LedgerEntry(**_make_entry(entry_id="001", type="decision"))]
+        assert has_verdict_for_scope(entries) is False
+
+    def test_has_verdict(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+        ]
+        assert has_verdict_for_scope(entries) is True
+
+    def test_completion_without_verdict_does_not_count(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="completion")),
+        ]
+        assert has_verdict_for_scope(entries) is False
+
+
+class TestValidateResolution:
+    def test_valid_resolution(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+        ]
+        blockers = validate_resolution(entries)
+        assert blockers == []
+
+    def test_blocked_by_open_failure(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+            LedgerEntry(**_make_entry(entry_id="002", type="failure")),
+        ]
+        blockers = validate_resolution(entries)
+        assert len(blockers) == 1
+        assert "conflict breaker" in blockers[0].lower() or "failure" in blockers[0].lower()
+
+    def test_blocked_by_active_objection(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+            LedgerEntry(**_make_entry(entry_id="002", type="objection", author="alice")),
+        ]
+        blockers = validate_resolution(entries)
+        assert len(blockers) == 1
+        assert "objection" in blockers[0].lower()
+
+    def test_blocked_by_no_verdict(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="decision")),
+        ]
+        blockers = validate_resolution(entries)
+        assert len(blockers) == 1
+        assert "verdict" in blockers[0].lower()
+
+    def test_multiple_blockers(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="failure")),
+            LedgerEntry(**_make_entry(entry_id="002", type="objection", author="alice")),
+        ]
+        blockers = validate_resolution(entries)
+        # Should have: open failure + active objection + no verdict = 3 blockers
+        assert len(blockers) == 3
+
+    def test_unblocked_after_repair_and_withdrawal(self):
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+            LedgerEntry(**_make_entry(entry_id="002", type="failure")),
+            LedgerEntry(**_make_entry(entry_id="003", type="objection", author="alice")),
+            # Repair addresses the failure
+            LedgerEntry(**_make_entry(
+                entry_id="004", type="repair", prior_entries=["002"],
+            )),
+            # Author withdraws the objection
+            LedgerEntry(**_make_entry(
+                entry_id="005", type="withdrawal", author="alice",
+                prior_entries=["003"],
+            )),
+        ]
+        blockers = validate_resolution(entries)
+        assert blockers == []
+
+    def test_repair_clears_objection(self):
+        """Repair closing entry that references an objection clears it."""
+        entries = [
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+            LedgerEntry(**_make_entry(entry_id="002", type="objection", author="alice")),
+            # Repair addresses the objection directly
+            LedgerEntry(**_make_entry(
+                entry_id="003", type="repair", author="arbiter",
+                prior_entries=["002"],
+            )),
+        ]
+        blockers = validate_resolution(entries)
+        assert blockers == []
+
+
+class TestResolutionPreservedInSummary:
+    def test_resolution_preserved_in_full(self, tmp_ledger):
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="001", type="resolution",
+            detail="convergence detail here",
+        ))
+        result = ledger_mod.summarize_ledger()
+        assert "convergence detail here" in result
+        assert "**resolution**" in result
+
+    def test_objection_preserved_in_full(self, tmp_ledger):
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="001", type="objection",
+            detail="objection detail here",
+        ))
+        result = ledger_mod.summarize_ledger()
+        assert "objection detail here" in result

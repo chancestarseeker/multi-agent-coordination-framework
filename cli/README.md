@@ -741,6 +741,129 @@ of falling through to the default:
 - Unstructured acknowledgments (no `response` field) are surfaced to
   console only.
 
+## Scope resolution
+
+A scope can be **resolved** when all friction has been addressed. Resolution
+is not a vote — it is a claim that the ledger state supports closure, validated
+by infrastructure against three conditions. Any participant can propose it,
+any participant can object.
+
+### Commands
+
+```bash
+# Raise an objection (blocks resolution until withdrawn or addressed)
+orchestrator object --scope scope/code/example_auth.py \
+  --as alice --references 003 \
+  --reason "Verdict 003 does not account for the auth token rotation case"
+
+# Withdraw an objection (only the original author can do this)
+orchestrator withdraw-objection --scope scope/code/example_auth.py \
+  --as alice --references 006 \
+  --reason "Addressed by repair entry 007"
+
+# Propose resolution (infrastructure validates: no open failures, no active
+# objections, at least one verdict exists)
+orchestrator resolve --scope scope/code/example_auth.py \
+  --as human-lead --references 003,005,007 \
+  --summary "Auth module converged: approve with token rotation guard added"
+
+# Reopen a resolved scope (new information, changed requirements, etc.)
+orchestrator reopen --scope scope/code/example_auth.py \
+  --as bob --references 008 \
+  --reason "New token rotation edge case discovered in production"
+```
+
+### Validation rules
+
+Resolution is rejected if any of the following are true:
+
+1. **Open conflict breakers** — a `failure` entry exists for the scope with
+   no `repair` entry referencing it
+2. **Active objections** — an `objection` entry exists that has not been
+   withdrawn by its author and has not been addressed by a `repair` entry
+3. **No verdict** — no `completion` entry with a `verdict` field exists for
+   the scope
+
+When validation fails, the rejection names exactly what is blocking so the
+proposing participant knows what to address.
+
+### Full lifecycle walkthrough
+
+This example traces the complete resolution lifecycle: verdicts, objection,
+repair, withdrawal, resolution, and reopen.
+
+```bash
+# --- Setup: offer and accept the orchestrator role ---
+orchestrator offer-role --scope scope/code/example_auth.py
+orchestrator accept-role --scope scope/code/example_auth.py --as human-lead
+
+# --- Step 1: Run a review. Two agents produce verdicts ---
+orchestrator review --scope scope/code/example_auth.py
+# Ledger now contains:
+#   001 - decision (convergence declared)
+#   002 - completion by claude-sonnet (verdict: approve_with_conditions)
+#   003 - completion by gpt-4o (verdict: approve)
+# No conflict — both are in the approve family.
+
+# --- Step 2: A participant raises an objection ---
+orchestrator object --scope scope/code/example_auth.py \
+  --as gpt-4o --references 002 \
+  --reason "The conditions in entry 002 (add rate limiting) were not evaluated against the existing middleware"
+
+# Ledger now has entry 004 (objection by gpt-4o).
+# Resolution is blocked: active objection exists.
+
+# --- Step 3: Attempting resolution fails ---
+orchestrator resolve --scope scope/code/example_auth.py \
+  --as human-lead --references 002,003 \
+  --summary "Approve with conditions"
+# OUTPUT: "Resolution blocked. Active objection: entry 004 by gpt-4o"
+
+# --- Step 4: Address the objection via repair ---
+# The objection points to a real gap. Run a repair cycle that
+# addresses it. The repair entry references the objection in prior_entries.
+orchestrator repair --failure-entry 004 --arbiter claude-sonnet
+# (Or if the objection isn't a failure, the author can simply withdraw it.)
+
+# --- Step 4 (alternative): The objector withdraws ---
+orchestrator withdraw-objection --scope scope/code/example_auth.py \
+  --as gpt-4o --references 004 \
+  --reason "After reviewing the middleware, rate limiting is already handled"
+
+# --- Step 5: Resolution succeeds ---
+orchestrator resolve --scope scope/code/example_auth.py \
+  --as human-lead --references 002,003 \
+  --summary "Auth module approved: rate limiting confirmed present in middleware"
+# OUTPUT: "Resolution written. Entry: 006. Scope is now resolved."
+
+# --- Step 6: Scope is closed ---
+# New reviews or attempts on this scope are rejected.
+# The resolution entry (006) is the canonical answer to "what happened here?"
+
+# --- Step 7: New information surfaces — reopen ---
+orchestrator reopen --scope scope/code/example_auth.py \
+  --as human-lead --references 006 \
+  --reason "Production incident: rate limiter does not cover the /refresh endpoint"
+# OUTPUT: "Scope reopened. New verdicts, objections, and a new resolution can follow."
+
+# The cycle can repeat: new reviews, new objections, new resolution.
+```
+
+### Resolved scope behavior
+
+Once a scope is resolved:
+- New `attempt` and `completion` entries targeting that scope are rejected
+- The resolution entry becomes the canonical reference point
+- Any participant can write a `reopen` entry to return it to active
+
+### How repair clears objections
+
+A repair entry can address an objection by including the objection's
+`entry_id` in `prior_entries`. This clears the objection as a blocker to
+resolution, same as a withdrawal by the original author. This is the path
+for when an objection raises a legitimate concern that gets addressed through
+the repair cycle rather than simply withdrawn.
+
 ## Iteration history
 
 1. ✅ ~~Conflict breaker → repair cycle~~ (step 2)
@@ -756,3 +879,4 @@ of falling through to the default:
 11. ✅ ~~Signal lineage validation~~ (step 8) — `validate_signal_lineage()`, warn on missing refs
 12. ✅ ~~Handoff prompt capture~~ (step 8) — `payload.prompt` opt-in via `capture_prompt_in_handoff` config
 13. ✅ ~~Verification rerun~~ (step 8) — `repair --verify`, `run_verification_rerun()`
+14. ✅ ~~Scope resolution lifecycle~~ (step 9) — `resolve`, `object`, `withdraw-objection`, `reopen` commands; resolution validation; resolved scope enforcement

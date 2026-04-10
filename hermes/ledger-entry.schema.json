@@ -38,7 +38,11 @@
         "failure",
         "repair",
         "boundary_change",
-        "intention_shift"
+        "intention_shift",
+        "resolution",
+        "objection",
+        "withdrawal",
+        "reopen"
       ],
       "description": "What state transition this entry records."
     },

@@ -18,6 +18,10 @@ VALID_ENTRY_TYPES = {
     "repair",
     "boundary_change",
     "intention_shift",
+    "resolution",
+    "objection",
+    "withdrawal",
+    "reopen",
 }
 
 VALID_VERDICTS = {
