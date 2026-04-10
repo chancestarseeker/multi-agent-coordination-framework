@@ -44,12 +44,21 @@ def current_orchestrator_for_scope(scope_rel: str) -> str | None:
     return holder
 
 
+# Structured tag used to store the offered-to participant in the offer entry's
+# summary field, so we don't have to parse markdown. Format: [offered:identifier]
+_OFFERED_TAG_PREFIX = "[offered:"
+_OFFERED_TAG_SUFFIX = "]"
+
+
 def pending_offer_for_scope(scope_rel: str) -> tuple[LedgerEntry | None, str | None]:
-    """Find the most recent unresolved offer for a scope.
+    """Find the most recent unresolved, non-expired offer for a scope.
 
     An offer is 'unresolved' if there is no subsequent accept, refuse, or
-    rotate entry referencing it. Returns (offer_entry, offered_to_participant)
-    or (None, None).
+    rotate entry referencing it. An offer is 'expired' if it is older than
+    the offered participant's latency_tolerance_seconds (or a default of
+    3600s if the participant has no declaration or no tolerance declared).
+
+    Returns (offer_entry, offered_to_participant) or (None, None).
     """
     entries = entries_for_scope(scope_rel)
     resolved_offer_ids: set[str] = set()
@@ -58,27 +67,58 @@ def pending_offer_for_scope(scope_rel: str) -> tuple[LedgerEntry | None, str | N
             for pid in e.prior_entries:
                 resolved_offer_ids.add(pid)
 
+    declarations = load_declarations()
+    decl_map = {d["identifier"]: d for d in declarations}
+    now = datetime.now(timezone.utc)
+
     # Walk backward to find the most recent unresolved offer
     for e in reversed(entries):
         if e.role_action == "offer_orchestrator" and e.entry_id not in resolved_offer_ids:
-            # The offered-to participant is named in the summary
-            # We store it in a structured way via the detail field
-            # For lookup, we parse from the entry's detail
             offered_to = _extract_offered_to(e)
+
+            # Check if the offer has expired
+            if offered_to:
+                decl = decl_map.get(offered_to)
+                tolerance = 3600  # default 1 hour
+                if decl:
+                    tolerance = (decl.get("context_constraints") or {}).get(
+                        "latency_tolerance_seconds", tolerance
+                    )
+                try:
+                    offer_time = datetime.fromisoformat(e.timestamp.replace("Z", "+00:00"))
+                    elapsed = (now - offer_time).total_seconds()
+                    if elapsed > tolerance:
+                        # Offer expired — treat as if no pending offer
+                        return None, None
+                except (ValueError, TypeError):
+                    pass
+
             return e, offered_to
     return None, None
 
 
 def _extract_offered_to(offer_entry: LedgerEntry) -> str | None:
-    """Extract the offered-to participant identifier from an offer entry's detail."""
-    for line in offer_entry.detail.split("\n"):
-        if line.startswith("**Offered to:**"):
-            # Format: **Offered to:** `participant-id`
-            start = line.find("`")
-            end = line.find("`", start + 1)
-            if start >= 0 and end > start:
-                return line[start + 1:end]
-    return None
+    """Extract the offered-to participant from the structured tag in summary.
+
+    Offer entries embed [offered:identifier] in the summary field for
+    reliable extraction without markdown parsing.
+    """
+    summary = offer_entry.summary
+    start = summary.find(_OFFERED_TAG_PREFIX)
+    if start < 0:
+        # Fallback: try markdown format for backward compat
+        for line in offer_entry.detail.split("\n"):
+            if line.startswith("**Offered to:**"):
+                tick_start = line.find("`")
+                tick_end = line.find("`", tick_start + 1)
+                if tick_start >= 0 and tick_end > tick_start:
+                    return line[tick_start + 1:tick_end]
+        return None
+    start += len(_OFFERED_TAG_PREFIX)
+    end = summary.find(_OFFERED_TAG_SUFFIX, start)
+    if end < 0:
+        return None
+    return summary[start:end]
 
 
 def check_rotation_triggers(
@@ -166,7 +206,8 @@ def write_role_offer(
         prior_entries=[],
         summary=(
             f"Orchestrator role offered to `{offered_to['identifier']}` for "
-            f"{scope_rel}. {reason}"
+            f"{scope_rel}. {reason} "
+            f"{_OFFERED_TAG_PREFIX}{offered_to['identifier']}{_OFFERED_TAG_SUFFIX}"
         ),
         detail=(
             f"# Orchestrator role offer\n\n"
@@ -622,12 +663,19 @@ def cmd_stepdown(
         )
         return 1
 
-    # Resolve --snapshot @path/to/file syntax
+    # Resolve --snapshot @path/to/file syntax with path containment
     snapshot_text = snapshot
     if snapshot is not None and snapshot.startswith("@"):
         snapshot_path = Path(snapshot[1:])
         if not snapshot_path.is_absolute():
             snapshot_path = ROOT / snapshot_path
+        snapshot_path = snapshot_path.resolve()
+        if not snapshot_path.is_relative_to(ROOT.resolve()):
+            console.print(
+                f"[red]error:[/] snapshot path escapes the coordination directory: "
+                f"{snapshot[1:]!r} resolves to {snapshot_path}"
+            )
+            return 2
         if not snapshot_path.exists():
             console.print(f"[red]error:[/] snapshot file not found: {snapshot_path}")
             return 2

@@ -1,18 +1,15 @@
 """
-Minimal orchestrator for the Multi-Agent Coordination Framework.
+CLI entry point for the Multi-Agent Coordination Framework orchestrator.
 
-Implements §7 of coordination-tech-stack.md as a small, honest first loop:
-load declarations, load foundations, hand a single scope artifact to each
-active agent, parse the proposed ledger entry from each response, validate
-it, append it to the ledger, and git-commit.
-
-What this orchestrator does NOT yet do (deliberately deferred):
-  - signal envelope inbox/archive plumbing
-  - circuit breaker enforcement (only confidence is checked, as a warning)
-  - routing decisions (every active agent reviews the same scope)
+This is the thin shell — argparse + dispatch. The actual coordination logic
+lives in the decomposed modules: review.py, repair.py, synthesis.py,
+roles.py, signals.py, breakers.py, ledger.py, retry.py, parsing.py,
+prompts.py, config.py, schema.py.
 
 Run:
     python orchestrator.py review --scope scope/code/example_auth.py
+    python orchestrator.py offer-role --scope scope/code/example_auth.py
+    python orchestrator.py ledger --summary
 """
 
 from __future__ import annotations
@@ -31,7 +28,7 @@ from cli.config import (
     get_repo,
 )
 from cli.signals import (
-    _ensure_signal_dirs,
+    ensure_signal_dirs,
     SIGNAL_HANDLERS,
     handle_default,
     archive_signal,
@@ -48,7 +45,7 @@ from cli.roles import cmd_offer_role, cmd_accept_role, cmd_refuse_role, cmd_step
 # ---------- Inbox subcommands ----------
 
 def inbox_list() -> int:
-    _ensure_signal_dirs()
+    ensure_signal_dirs()
     pending = sorted(SIGNAL_INBOX.glob("*.json"))
     archived = sorted(SIGNAL_ARCHIVE.glob("*.json"))
 
@@ -92,7 +89,7 @@ def inbox_process() -> int:
     into signal/inbox/, run this command, and watch it dispatch through the
     handlers without any API calls.
     """
-    _ensure_signal_dirs()
+    ensure_signal_dirs()
     pending = sorted(SIGNAL_INBOX.glob("*.json"))
     if not pending:
         console.print("[dim]signal/inbox/ is empty — nothing to process[/]")

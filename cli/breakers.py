@@ -1,4 +1,4 @@
-"""Circuit breakers: conflict, repetition, resource, and timeout."""
+"""Circuit breakers: confidence, conflict, repetition, resource, and timeout."""
 
 from __future__ import annotations
 
@@ -10,7 +10,53 @@ from git import Repo
 from cli.schema import LedgerEntry, SignalEnvelope
 from cli.config import SIGNAL_ARCHIVE, console, load_declarations
 from cli.ledger import next_entry_id, write_entry, entries_for_scope, unresolved_failures_for_scope
-from cli.signals import _ensure_signal_dirs
+from cli.signals import ensure_signal_dirs
+
+
+def write_confidence_failure(
+    repo: Repo | None,
+    scope_path: str,
+    entry: LedgerEntry,
+    confidence_floor: float,
+    role_holder: str,
+) -> LedgerEntry:
+    """The Confidence circuit breaker.
+
+    Per fnd-failure.md: fires when a participant reports confidence below
+    the floor on a task that has no fallback routing. Writes a failure
+    entry and signals the coordination to enter the repair cycle.
+    """
+    failure = LedgerEntry(
+        entry_id=next_entry_id(),
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        author=role_holder,
+        type="failure",
+        scope=scope_path,
+        prior_entries=[entry.entry_id],
+        summary=(
+            f"Confidence circuit breaker fired: `{entry.author}` reported "
+            f"confidence {entry.confidence:.2f} on {scope_path} "
+            f"(floor: {confidence_floor})."
+        ),
+        detail=(
+            f"# Confidence circuit breaker fired\n\n"
+            f"**Participant:** `{entry.author}`\n\n"
+            f"**Scope:** `{scope_path}`\n\n"
+            f"**Reported confidence:** {entry.confidence:.2f}\n\n"
+            f"**Floor threshold:** {confidence_floor}\n\n"
+            f"**Entry:** {entry.entry_id}\n\n"
+            f"Per fnd-failure.md, the Confidence breaker fires when a "
+            f"participant reports confidence below the floor. This indicates "
+            f"the participant is uncertain about the quality of their work — "
+            f"that uncertainty is signal, not failure. The repair cycle should "
+            f"diagnose whether the task framing, the scope, or the participant "
+            f"match is the issue."
+        ),
+        confidence=1.0,
+        foundation_tag=["truth", "signal"],
+    )
+    write_entry(failure, repo)
+    return failure
 
 
 def detect_verdict_conflict(entries: list[LedgerEntry]) -> bool:
@@ -229,7 +275,7 @@ def check_timeout_breaker(repo: Repo | None) -> list[LedgerEntry]:
 
     Returns any failure entries written (one per timed-out signal).
     """
-    _ensure_signal_dirs()
+    ensure_signal_dirs()
     declarations = load_declarations()
     decl_map = {d["identifier"]: d for d in declarations}
 

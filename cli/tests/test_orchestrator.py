@@ -27,10 +27,18 @@ from cli.breakers import (
     check_resource_breaker,
     _session_token_usage,
 )
-from cli.signals import validate_signal_lineage
+from cli.signals import validate_signal_lineage, handle_state_update, handle_acknowledgment
+from cli.roles import (
+    current_orchestrator_for_scope,
+    pending_offer_for_scope,
+    _extract_offered_to,
+    _OFFERED_TAG_PREFIX,
+    _OFFERED_TAG_SUFFIX,
+)
 import cli.ledger as ledger_mod
 import cli.config as config_mod
 import cli.signals as signals_mod
+import cli.roles as roles_mod
 
 
 # ---------- Fixtures ----------
@@ -378,3 +386,190 @@ class TestResolveScope:
     def test_dot_dot_in_middle_rejected(self):
         with pytest.raises(ValueError, match="escapes"):
             resolve_scope("scope/../../etc/shadow")
+
+
+# ---------- Role lifecycle state machine ----------
+
+
+class TestRoleStateMachine:
+    def test_no_holder_initially(self, tmp_ledger):
+        assert current_orchestrator_for_scope("scope/test.py") is None
+
+    def test_accept_sets_holder(self, tmp_ledger):
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="001", role_action="offer_orchestrator", author="field",
+        ))
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="002", role_action="accept_orchestrator", author="alice",
+            prior_entries=["001"],
+        ))
+        assert current_orchestrator_for_scope("scope/test.py") == "alice"
+
+    def test_rotate_clears_holder(self, tmp_ledger):
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="001", role_action="accept_orchestrator", author="alice",
+        ))
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="002", role_action="rotate_orchestrator", author="alice",
+        ))
+        assert current_orchestrator_for_scope("scope/test.py") is None
+
+    def test_stepdown_clears_holder(self, tmp_ledger):
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="001", role_action="accept_orchestrator", author="alice",
+        ))
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="002", role_action="stepdown_orchestrator", author="alice",
+        ))
+        assert current_orchestrator_for_scope("scope/test.py") is None
+
+    def test_other_participant_cannot_rotate_holder(self, tmp_ledger):
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="001", role_action="accept_orchestrator", author="alice",
+        ))
+        # bob tries to rotate alice — should not work (author != holder)
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="002", role_action="rotate_orchestrator", author="bob",
+        ))
+        assert current_orchestrator_for_scope("scope/test.py") == "alice"
+
+    def test_offer_does_not_grant_role(self, tmp_ledger):
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="001", role_action="offer_orchestrator", author="field",
+        ))
+        assert current_orchestrator_for_scope("scope/test.py") is None
+
+
+class TestPendingOffer:
+    def test_no_pending_offer(self, tmp_ledger):
+        offer, offered_to = pending_offer_for_scope("scope/test.py")
+        assert offer is None
+
+    def test_finds_pending_offer(self, tmp_ledger):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="001", role_action="offer_orchestrator", author="field",
+            timestamp=now,
+            summary=f"Offered to alice {_OFFERED_TAG_PREFIX}alice{_OFFERED_TAG_SUFFIX}",
+        ))
+        offer, offered_to = pending_offer_for_scope("scope/test.py")
+        assert offer is not None
+        assert offered_to == "alice"
+
+    def test_accepted_offer_is_resolved(self, tmp_ledger):
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="001", role_action="offer_orchestrator", author="field",
+            summary=f"Offered {_OFFERED_TAG_PREFIX}alice{_OFFERED_TAG_SUFFIX}",
+        ))
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="002", role_action="accept_orchestrator", author="alice",
+            prior_entries=["001"],
+        ))
+        offer, _ = pending_offer_for_scope("scope/test.py")
+        assert offer is None
+
+    def test_refused_offer_is_resolved(self, tmp_ledger):
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="001", role_action="offer_orchestrator", author="field",
+            summary=f"Offered {_OFFERED_TAG_PREFIX}alice{_OFFERED_TAG_SUFFIX}",
+        ))
+        _write_entry(tmp_ledger, _make_entry(
+            entry_id="002", role_action="refuse_orchestrator", author="alice",
+            prior_entries=["001"],
+        ))
+        offer, _ = pending_offer_for_scope("scope/test.py")
+        assert offer is None
+
+
+class TestExtractOfferedTo:
+    def test_structured_tag(self):
+        entry = LedgerEntry(**_make_entry(
+            summary=f"Role offered {_OFFERED_TAG_PREFIX}bob{_OFFERED_TAG_SUFFIX}",
+        ))
+        assert _extract_offered_to(entry) == "bob"
+
+    def test_fallback_markdown(self):
+        entry = LedgerEntry(**_make_entry(
+            summary="Role offered",
+            detail="**Offered to:** `charlie`\n\nMore text",
+        ))
+        assert _extract_offered_to(entry) == "charlie"
+
+    def test_no_tag_returns_none(self):
+        entry = LedgerEntry(**_make_entry(summary="No tag here"))
+        assert _extract_offered_to(entry) is None
+
+
+# ---------- Signal handler tests ----------
+
+
+class TestHandleStateUpdate:
+    """Test handle_state_update with scope+state payload."""
+
+    def test_scope_state_creates_attempt(self, tmp_ledger, tmp_signals):
+        env = SignalEnvelope(
+            signal_id="sig-001", origin="agent-a", destination="orchestrator",
+            timestamp="2026-01-01T00:00:00Z", type="state_update",
+            payload={"scope": "scope/test.py", "state": "in progress on section 2"},
+            context_summary="progress update", confidence=0.8, lineage=[],
+        )
+        # handle_state_update needs a repo-like object; pass None since write_entry handles it
+        from unittest.mock import MagicMock
+        mock_repo = MagicMock()
+        mock_repo.working_tree_dir = str(tmp_ledger.parent.parent)
+        mock_repo.index.add = MagicMock()
+        mock_repo.index.commit = MagicMock()
+        entry = handle_state_update(env, mock_repo)
+        assert entry is not None
+        assert entry.type == "attempt"
+        assert entry.author == "agent-a"
+        assert "in progress on section 2" in entry.summary
+
+    def test_unstructured_returns_none(self, tmp_ledger, tmp_signals):
+        env = SignalEnvelope(
+            signal_id="sig-002", origin="agent-a", destination="orchestrator",
+            timestamp="2026-01-01T00:00:00Z", type="state_update",
+            payload={"note": "just a note"},
+            context_summary="unstructured", confidence=0.5, lineage=[],
+        )
+        from unittest.mock import MagicMock
+        entry = handle_state_update(env, MagicMock())
+        assert entry is None
+
+
+class TestHandleAcknowledgment:
+    def test_accept_creates_attempt(self, tmp_ledger, tmp_signals):
+        env = SignalEnvelope(
+            signal_id="sig-001", origin="agent-a", destination="orchestrator",
+            timestamp="2026-01-01T00:00:00Z", type="acknowledgment",
+            payload={"response": "accept", "scope": "scope/test.py"},
+            context_summary="accepting task", confidence=0.9, lineage=[],
+        )
+        from unittest.mock import MagicMock
+        mock_repo = MagicMock()
+        mock_repo.working_tree_dir = str(tmp_ledger.parent.parent)
+        mock_repo.index.add = MagicMock()
+        mock_repo.index.commit = MagicMock()
+        entry = handle_acknowledgment(env, mock_repo)
+        assert entry is not None
+        assert entry.type == "attempt"
+        assert "accepted" in entry.summary.lower()
+
+    def test_refuse_creates_decision(self, tmp_ledger, tmp_signals):
+        env = SignalEnvelope(
+            signal_id="sig-002", origin="agent-b", destination="orchestrator",
+            timestamp="2026-01-01T00:00:00Z", type="acknowledgment",
+            payload={"response": "refuse-with-reason", "scope": "scope/test.py",
+                     "reason": "outside my capability envelope"},
+            context_summary="refusing task", confidence=0.9, lineage=[],
+        )
+        from unittest.mock import MagicMock
+        mock_repo = MagicMock()
+        mock_repo.working_tree_dir = str(tmp_ledger.parent.parent)
+        mock_repo.index.add = MagicMock()
+        mock_repo.index.commit = MagicMock()
+        entry = handle_acknowledgment(env, mock_repo)
+        assert entry is not None
+        assert entry.type == "decision"
+        assert "refused" in entry.summary.lower()
