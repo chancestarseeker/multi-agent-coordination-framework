@@ -18,6 +18,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -193,8 +194,21 @@ class LedgerEntry(BaseModel):
 
 # ---------- Loading ----------
 
+_cached_config: dict | None = None
+
+
 def load_config() -> dict:
-    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    """Load config.json, cached for the lifetime of this process.
+
+    The config is read once from disk and reused on subsequent calls.
+    This avoids redundant file reads (the old version re-read on every
+    call, including inside the retry loop). The cache is process-scoped,
+    so a new CLI invocation always reads fresh config.
+    """
+    global _cached_config
+    if _cached_config is None:
+        _cached_config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    return _cached_config
 
 
 def load_declarations() -> list[dict]:
@@ -263,12 +277,42 @@ def load_foundations(filenames: list[str]) -> str:
     return "\n\n".join(parts)
 
 
+def resolve_scope(scope_rel: str) -> Path:
+    """Resolve a scope path relative to ROOT, with path-traversal protection.
+
+    Prevents directory traversal attacks (e.g., --scope ../../etc/passwd)
+    by verifying the resolved path stays within ROOT. Raises ValueError
+    if the path escapes the coordination directory.
+    """
+    scope_abs = (ROOT / scope_rel).resolve()
+    if not scope_abs.is_relative_to(ROOT.resolve()):
+        raise ValueError(
+            f"scope path escapes the coordination directory: "
+            f"{scope_rel!r} resolves to {scope_abs}, which is outside {ROOT.resolve()}"
+        )
+    return scope_abs
+
+
 def next_entry_id() -> str:
-    existing = sorted(LEDGER_DIR.glob("*.json"))
-    if not existing:
-        return "001"
-    last = existing[-1].name.split("-", 1)[0]
-    return f"{int(last) + 1:03d}"
+    """Monotonic entry id, with file-lock to prevent collisions.
+
+    Uses an exclusive lock on a `.lock` file in LEDGER_DIR to ensure
+    that two concurrent orchestrator processes cannot generate the same
+    entry id. The lock is held only for the duration of the ID read +
+    increment, not for the subsequent file write.
+    """
+    LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = LEDGER_DIR / ".lock"
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            existing = sorted(LEDGER_DIR.glob("*.json"))
+            if not existing:
+                return "001"
+            last = existing[-1].name.split("-", 1)[0]
+            return f"{int(last) + 1:03d}"
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 # ---------- Prompt construction ----------
@@ -764,23 +808,30 @@ def write_participant_failure(
 # the offline testing entry point — no API keys needed.
 
 def _next_signal_id() -> str:
-    """Monotonic signal id, scoped to inbox + archive."""
-    existing = sorted(
-        list(SIGNAL_INBOX.glob("*.json")) + list(SIGNAL_ARCHIVE.glob("*.json"))
-    )
-    if not existing:
-        return "sig-001"
-    nums: list[int] = []
-    for p in existing:
-        stem = p.stem
-        if stem.startswith("sig-"):
-            try:
-                nums.append(int(stem.split("-")[1]))
-            except (ValueError, IndexError):
-                continue
-    if not nums:
-        return "sig-001"
-    return f"sig-{max(nums) + 1:03d}"
+    """Monotonic signal id, scoped to inbox + archive, with file-lock."""
+    _ensure_signal_dirs()
+    lock_path = SIGNAL_ARCHIVE / ".lock"
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            existing = sorted(
+                list(SIGNAL_INBOX.glob("*.json")) + list(SIGNAL_ARCHIVE.glob("*.json"))
+            )
+            if not existing:
+                return "sig-001"
+            nums: list[int] = []
+            for p in existing:
+                stem = p.stem
+                if stem.startswith("sig-"):
+                    try:
+                        nums.append(int(stem.split("-")[1]))
+                    except (ValueError, IndexError):
+                        continue
+            if not nums:
+                return "sig-001"
+            return f"sig-{max(nums) + 1:03d}"
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _ensure_signal_dirs() -> None:
@@ -1428,13 +1479,18 @@ def process_signals_from_response(
                 f"[yellow]warning: invalid signal envelope from {source_decl['identifier']}: {e}[/]"
             )
             continue
-        # Author check (mirror of the entry author check)
+        # Author check: enforce that signal origin matches the authenticated
+        # source. Per fnd-field.md: "Write to the ledger on behalf of a
+        # participant without that participant's signal" is forbidden. A
+        # mismatched origin would produce ledger entries attributed to the
+        # wrong participant via signal handlers.
         if envelope.origin != source_decl["identifier"]:
             console.print(
                 f"[yellow]warning: signal {envelope.signal_id} claims origin "
-                f"{envelope.origin} but came from {source_decl['identifier']}; "
-                f"recording as-is[/]"
+                f"`{envelope.origin}` but came from `{source_decl['identifier']}`. "
+                f"Overwriting origin to match authenticated source.[/]"
             )
+            envelope = envelope.model_copy(update={"origin": source_decl["identifier"]})
         signals.append(envelope)
         process_signal(envelope, repo)
     return signals
@@ -1649,7 +1705,11 @@ def run_review(scope_rel: str, task_type: str | None = None) -> int:
     convergence_cfg = config.get("convergence", {})
     conflict_protocol = convergence_cfg.get("default_protocol", "escalate_to_repair")
 
-    scope_abs = ROOT / scope_rel
+    try:
+        scope_abs = resolve_scope(scope_rel)
+    except ValueError as e:
+        console.print(f"[red]error:[/] {e}")
+        return 2
     if not scope_abs.exists():
         console.print(f"[red]error:[/] scope file not found: {scope_rel}")
         return 2
@@ -2075,7 +2135,11 @@ def run_verification_rerun(
         )
         return 0
 
-    scope_abs = ROOT / failure.scope
+    try:
+        scope_abs = resolve_scope(failure.scope)
+    except ValueError as e:
+        console.print(f"[red]error:[/] {e}")
+        return 2
     if not scope_abs.exists():
         console.print(f"[red]error:[/] scope file not found for verification: {failure.scope}")
         return 2
@@ -3474,7 +3538,11 @@ def run_synthesis(scope_rel: str) -> int:
     declarations = load_declarations()
     intention = config.get("intention", "")
 
-    scope_abs = ROOT / scope_rel
+    try:
+        scope_abs = resolve_scope(scope_rel)
+    except ValueError as e:
+        console.print(f"[red]error:[/] {e}")
+        return 2
     if not scope_abs.exists():
         console.print(f"[red]error:[/] scope file not found: {scope_rel}")
         return 2
