@@ -22,7 +22,7 @@ Conflict is coordination under strain — a signal that something in the web of 
 
 5. **Verify** — Test the resolution against the original conditions. Verification must either include a limited rerun of the failed work under the resolved conditions, or explicitly record why rerun is impossible or unsafe (this justification becomes part of the `repair` entry). If the same circuit breaker would fire under the same conditions, the resolution has not held.
 
-6. **Record** — Write the conflict, diagnosis, and resolution to the ledger as a `repair` entry (see entry types in `fnd-ledger.md`). Link it to the `failure` entry that initiated the cycle via `prior_entries`. This is how the coordination learns — future participants encountering similar conditions will find both the failure and its resolution in the ledger.
+6. **Record** — Write the conflict, diagnosis, and resolution to the ledger as a `repair` entry (see entry types in `fnd-ledger.md`). Link it to the `failure` entry that initiated the cycle via `prior_entries`. If the repair addresses one or more active `objection` entries, reference them in `prior_entries` as well — this clears them as blockers to scope resolution (see Scope Resolution in `fnd-ledger.md`). This is how the coordination learns — future participants encountering similar conditions will find both the failure and its resolution in the ledger.
 
 ## Repair Principles
 

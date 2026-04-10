@@ -25,7 +25,7 @@ Every ledger entry contains these fields:
 | **entry_id** | string | Unique identifier for this entry. |
 | **timestamp** | ISO 8601 | When the entry was written. |
 | **author** | string | Identifier of the participant proposing this entry. |
-| **type** | enum | `decision` · `attempt` · `completion` · `failure` · `repair` · `boundary_change` · `intention_shift` |
+| **type** | enum | `decision` · `attempt` · `completion` · `failure` · `repair` · `boundary_change` · `intention_shift` · `resolution` · `objection` · `withdrawal` · `reopen` |
 | **scope** | string | Which artifact, task, or coordination area this entry concerns. |
 | **prior_entries** | string[] | Entry IDs this one depends on or responds to. Empty for root entries. |
 | **summary** | string | One to three sentences: what happened and why it matters. A new participant should be able to read this field alone and orient. |
@@ -48,6 +48,14 @@ Every ledger entry contains these fields:
 **boundary_change** — A participant's relationship to the coordination has changed. This covers: new participant entry (declaration filed), declaration updates (capability, constraints, or availability changed), reduced capacity (constraints tightened beyond original declaration), relinquish (scope marked as unowned), graceful departure (participant exited), ungraceful departure detected (participant marked unresponsive), and return (fresh declaration from a previously departed participant). Other participants should recalibrate expectations on every `boundary_change`. See `fnd-participants.md`.
 
 **intention_shift** — The coordination's purpose has changed. All active participants should re-evaluate whether their current work still serves the new intention. Also written when a transition to Emergent Mode is accompanied by a statement of the question being explored (see `fnd-field.md`).
+
+**resolution** — A scope has converged. Any participant currently active in the scope may propose a resolution. The entry references the verdict, repair, and other entry IDs that constitute the convergence (the author is showing their work, pointing at ledger evidence) and includes a natural language summary of what was converged on. Infrastructure validates the proposal before accepting it — see Scope Resolution below.
+
+**objection** — A participant formally blocks resolution of a scope. The entry names the scope, references the specific entries being objected to, and provides a reason. An active objection prevents any `resolution` entry for that scope from passing validation. Objections remain active until withdrawn by their author or addressed through a completed repair cycle. Any participant currently active in the scope may write an objection.
+
+**withdrawal** — The author of a prior `objection` retracts it. References the objection entry being withdrawn, with an optional reason. Only the original objection's author may write a withdrawal for it. Clearing an objection via withdrawal removes it as a blocker to resolution.
+
+**reopen** — A previously resolved scope is returned to active status. Any participant currently active in the scope may write a reopen entry, referencing the `resolution` entry being reopened and providing a reason. Once reopened, the scope accepts new verdicts, objections, and eventually a new resolution.
 
 ---
 
@@ -97,6 +105,39 @@ The Coordination Directory (see `fnd-participants.md`) is also built from ledger
 
 ### Scoped Reads
 A participant working on a specific task may request only ledger entries matching a given `scope` value. This is the most context-efficient read pattern for focused work.
+
+---
+
+## Scope Resolution
+
+A scope begins as **active** when the first entry referencing it is written. It remains active until a `resolution` entry passes validation and is appended, at which point the scope becomes **resolved**. A `reopen` entry returns a resolved scope to active.
+
+```
+[active] --(resolution validated and appended)--> [resolved]
+[resolved] --(reopen appended)--> [active]
+```
+
+### Resolution Validation
+
+Infrastructure validates every proposed `resolution` entry before accepting it. The validation checks:
+
+1. **No open conflict breakers** for the scope. If a Conflict circuit breaker has fired (see `fnd-failure.md`) and no completed `repair` entry references that failure, the resolution is rejected.
+2. **No active objections** for the scope. An objection is active if no `withdrawal` from the same author references it and no completed `repair` entry references it as addressed. If any active objection exists, the resolution is rejected.
+3. **At least one verdict exists** for the scope. An empty scope cannot be resolved.
+
+When validation fails, the rejection names exactly what is blocking — which unresolved conflict, which active objection — so the proposing participant knows what must be addressed before resolution can proceed.
+
+### Resolution Is Not a Vote
+
+There is no quorum. There is no counting. Resolution is a claim that the ledger state supports closure, validated by infrastructure against the conditions above. Convergence is the absence of unresolved friction — not the presence of sufficient agreement.
+
+All active participants have equal standing to propose resolution or raise objections. The resolution mechanism does not rank, score, or weight participants in any way.
+
+### Resolved Scope Behavior
+
+Once a scope is resolved, new verdicts and attempts targeting that scope are rejected by infrastructure. The resolution entry becomes the canonical reference point — any participant asking "what happened with this scope?" reads the resolution and follows its references back into the ledger.
+
+If circumstances change or new information surfaces, any active participant may write a `reopen` entry, which returns the scope to active and allows the full cycle to proceed again.
 
 ---
 

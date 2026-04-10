@@ -53,3 +53,5 @@ Circuit breaker thresholds are defined in the preamble. When any breaker fires:
 5. If the coordination was in Orchestrated Mode, the orchestrator decides whether to hold mode or transition to Infrastructure while repair proceeds. If in Emergent Mode, participants self-pause on the affected scope. In Infrastructure Mode, the pause is automatic and the breach is escalated (see `fnd-field.md`).
 
 The coordination does not continue with degraded foundations. A system that routes around a fired circuit breaker has chosen speed over integrity and will compound the failure downstream.
+
+An open circuit breaker also blocks scope resolution. A `resolution` entry for any scope with an unresolved Conflict breaker will fail validation (see Scope Resolution in `fnd-ledger.md`). This ensures that convergence cannot be declared while the ledger still records unaddressed structural friction.

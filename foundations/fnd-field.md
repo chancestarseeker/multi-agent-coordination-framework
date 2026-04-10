@@ -18,7 +18,7 @@ The coordination operates in one of three modes at any given moment. The mode is
 
 **When:** Things are flowing. Participants are working within declared boundaries. No circuit breakers are close to firing.
 
-**What the coordination does:** Schema validation on ledger proposals (see write protocol in `fnd-ledger.md`). Conflict detection on concurrent state updates. Circuit breaker threshold monitoring (see thresholds in preamble). Ledger summary generation on session resumption.
+**What the coordination does:** Schema validation on ledger proposals (see write protocol in `fnd-ledger.md`). Conflict detection on concurrent state updates. Circuit breaker threshold monitoring (see thresholds in preamble). Ledger summary generation on session resumption. Resolution validation — checking proposed `resolution` entries against open conflicts and active objections before accepting them (see Scope Resolution in `fnd-ledger.md`).
 
 **What it does not do:** Route tasks. Make judgments. Interpret results. Assign work.
 
