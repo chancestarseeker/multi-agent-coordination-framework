@@ -564,6 +564,8 @@ def request_entry_with_retry(
     # This creates the trace; the agent's response will be processed below.
     if repo is not None and from_participant is not None:
         try:
+            config = load_config()
+            capture_prompt = config.get("capture_prompt_in_handoff", False)
             write_outgoing_handoff(
                 repo=repo,
                 from_participant=from_participant,
@@ -575,6 +577,7 @@ def request_entry_with_retry(
                     "required_prior_entries": list(required_prior_entries),
                 },
                 lineage=list(required_prior_entries),
+                prompt_messages=base_messages if capture_prompt else None,
             )
         except Exception as e:  # noqa: BLE001
             console.print(f"[yellow]warning: handoff envelope write failed: {e}[/]")
@@ -591,6 +594,13 @@ def request_entry_with_retry(
             text = resp.choices[0].message.content or ""
         except Exception as e:  # noqa: BLE001
             return None, f"provider error: {e}"
+
+        # Track token usage for the Resource circuit breaker
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            total_tokens = getattr(usage, "total_tokens", 0) or 0
+            if total_tokens > 0:
+                record_token_usage(decl["identifier"], total_tokens)
 
         # --- Process any out-of-band signals first ---
         # Signals are independent of entry validation: a valid signal is
@@ -796,6 +806,7 @@ def write_outgoing_handoff(
     scope_path: str,
     payload: dict[str, Any],
     lineage: list[str],
+    prompt_messages: list[dict] | None = None,
 ) -> SignalEnvelope:
     """Write a `handoff` signal envelope for an orchestrator → agent call.
 
@@ -809,19 +820,27 @@ def write_outgoing_handoff(
     Outgoing handoffs go directly to archive (not inbox) because they are
     not pending processing — they are processed by being sent. The archive
     copy is the durable trace.
+
+    If `prompt_messages` is provided (opt-in via config `capture_prompt_in_handoff`),
+    the full system+user message list is included as `payload.prompt`, making
+    the handoff fully auditable. This is off by default because it
+    substantially increases archive file sizes.
     """
     _ensure_signal_dirs()
+    full_payload: dict[str, Any] = {
+        "task_type": task_type,
+        "scope": scope_path,
+        **payload,
+    }
+    if prompt_messages is not None:
+        full_payload["prompt"] = prompt_messages
     envelope = SignalEnvelope(
         signal_id=_next_signal_id(),
         origin=from_participant,
         destination=to_agent,
         timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         type="handoff",
-        payload={
-            "task_type": task_type,
-            "scope": scope_path,
-            **payload,
-        },
+        payload=full_payload,
         context_summary=(
             f"{from_participant} → {to_agent}: {task_type} task on {scope_path}"
         ),
@@ -1096,14 +1115,214 @@ def handle_error(envelope: SignalEnvelope, repo: Repo) -> LedgerEntry | None:
     return None
 
 
-def handle_default(envelope: SignalEnvelope, repo: Repo) -> LedgerEntry | None:
-    """Default handler for signal types without specialized processing.
+def handle_state_update(envelope: SignalEnvelope, repo: Repo) -> LedgerEntry | None:
+    """Handle a `state_update` signal from a participant.
 
-    Surfaces the signal to the console and archives it. No ledger entry.
-    These types (handoff, state_update, acknowledgment) need richer
-    machinery to handle properly — peer-to-peer routing for handoff,
-    convergence resolution for state_update, lineage tracing for
-    acknowledgment. Future work.
+    A state_update conveys progress or state on a scope. Per fnd-ledger.md
+    Write Protocol, participants propose entries via state_update signals.
+
+    If `payload.proposed_entry` is a full ledger entry dict, validate and
+    write it directly. Otherwise, synthesize an `attempt` entry from the
+    payload's `scope` and `state` fields. Falls back to console-only if
+    the payload doesn't carry enough structure for a ledger entry.
+    """
+    payload = envelope.payload or {}
+
+    # Case 1: full proposed entry
+    if "proposed_entry" in payload and isinstance(payload["proposed_entry"], dict):
+        raw = payload["proposed_entry"]
+        raw.setdefault("entry_id", "AUTO")
+        raw.setdefault("timestamp", "AUTO")
+        raw.setdefault("author", envelope.origin)
+        try:
+            entry = finalize_entry(raw, envelope.origin, raw.get("scope", "unknown"))
+        except (ValidationError, ValueError) as e:
+            console.print(
+                f"[yellow]state_update from {envelope.origin}: proposed entry "
+                f"failed validation: {e}[/]"
+            )
+            return None
+        path = write_entry(entry, repo)
+        console.print(
+            Panel(
+                f"[bold]State update → ledger entry[/]\n"
+                f"[bold]From:[/] `{envelope.origin}` · [bold]Entry:[/] {entry.entry_id}\n"
+                f"[bold]Type:[/] {entry.type} · [bold]Scope:[/] `{entry.scope}`\n\n"
+                f"{entry.summary}",
+                title=f"signal: state_update → {path.name}",
+                border_style="green",
+            )
+        )
+        return entry
+
+    # Case 2: scope + state fields → synthesize an attempt entry
+    scope = payload.get("scope")
+    state = payload.get("state")
+    if scope and state:
+        entry = LedgerEntry(
+            entry_id=next_entry_id(),
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            author=envelope.origin,
+            type="attempt",
+            scope=scope,
+            prior_entries=[],
+            summary=f"State update from {envelope.origin}: {state}",
+            detail=(
+                f"# State update via signal\n\n"
+                f"**Signal id:** {envelope.signal_id}\n\n"
+                f"**State:** {state}\n\n"
+                f"**Context:** {envelope.context_summary}\n\n"
+                f"**Full payload:** {json.dumps(payload, indent=2)}"
+            ),
+            confidence=envelope.confidence,
+            foundation_tag=["signal"],
+        )
+        write_entry(entry, repo)
+        console.print(
+            Panel(
+                f"[bold]State update → attempt entry[/]\n"
+                f"[bold]From:[/] `{envelope.origin}` · [bold]Scope:[/] `{scope}`\n\n"
+                f"{state}",
+                title=f"signal: state_update → {entry.entry_id}",
+                border_style="green",
+            )
+        )
+        return entry
+
+    # Case 3: unstructured — surface to console only
+    console.print(
+        Panel(
+            f"[bold]State update (unstructured)[/]\n"
+            f"[bold]From:[/] `{envelope.origin}` → `{envelope.destination}`\n\n"
+            f"{envelope.context_summary}\n\n"
+            f"[dim]Payload:[/] {json.dumps(payload, indent=2)}\n\n"
+            f"[dim]No `proposed_entry` or `scope`+`state` in payload — "
+            f"archived for human review.[/]",
+            title=f"signal: state_update",
+            border_style="blue",
+        )
+    )
+    return None
+
+
+def handle_acknowledgment(envelope: SignalEnvelope, repo: Repo) -> LedgerEntry | None:
+    """Handle an `acknowledgment` signal.
+
+    An acknowledgment confirms receipt of a prior signal or task assignment.
+    Per fnd-preamble.md, payload.response is one of: `accept`,
+    `accept-with-conditions`, or `refuse-with-reason`.
+
+    - accept / accept-with-conditions → write an `attempt` entry
+      (per fnd-participants.md, acceptance is recorded as an attempt entry).
+    - refuse-with-reason → write a `decision` entry recording the refusal
+      so other participants can see the scope is available.
+    - no response field → surface to console only (backward compat).
+    """
+    payload = envelope.payload or {}
+    response = payload.get("response", "")
+    scope = payload.get("scope", "unknown")
+    reason = payload.get("reason", "")
+
+    # Validate the acknowledged signal exists in archive
+    ack_signal_ids = envelope.lineage
+    for sid in ack_signal_ids:
+        if not (SIGNAL_ARCHIVE / f"{sid}.json").exists():
+            console.print(
+                f"[yellow]acknowledgment {envelope.signal_id} references "
+                f"signal {sid} not found in archive[/]"
+            )
+
+    if response in ("accept", "accept-with-conditions"):
+        conditions = f" Conditions: {payload.get('conditions', 'none stated')}" if response == "accept-with-conditions" else ""
+        entry = LedgerEntry(
+            entry_id=next_entry_id(),
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            author=envelope.origin,
+            type="attempt",
+            scope=scope,
+            prior_entries=ack_signal_ids,
+            summary=(
+                f"{envelope.origin} accepted task on `{scope}`.{conditions}"
+            ),
+            detail=(
+                f"# Task acceptance via acknowledgment signal\n\n"
+                f"**Signal id:** {envelope.signal_id}\n\n"
+                f"**Response:** {response}\n\n"
+                f"**Acknowledged signals:** {', '.join(ack_signal_ids) or '—'}\n\n"
+                f"**Context:** {envelope.context_summary}"
+                + (f"\n\n**Conditions:** {payload.get('conditions', '')}" if response == "accept-with-conditions" else "")
+            ),
+            confidence=envelope.confidence,
+            foundation_tag=["choice"],
+        )
+        write_entry(entry, repo)
+        console.print(
+            Panel(
+                f"[bold green]Task accepted[/] by `{envelope.origin}` on `{scope}`"
+                + (f"\n[dim]Conditions: {payload.get('conditions', '')}[/]" if response == "accept-with-conditions" else ""),
+                title=f"signal: acknowledgment → attempt {entry.entry_id}",
+                border_style="green",
+            )
+        )
+        return entry
+
+    if response == "refuse-with-reason":
+        entry = LedgerEntry(
+            entry_id=next_entry_id(),
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            author=envelope.origin,
+            type="decision",
+            scope=scope,
+            prior_entries=ack_signal_ids,
+            summary=(
+                f"{envelope.origin} refused task on `{scope}`: {reason}"
+            ),
+            detail=(
+                f"# Task refusal via acknowledgment signal\n\n"
+                f"**Signal id:** {envelope.signal_id}\n\n"
+                f"**Response:** refuse-with-reason\n\n"
+                f"**Reason:** {reason}\n\n"
+                f"**Acknowledged signals:** {', '.join(ack_signal_ids) or '—'}\n\n"
+                f"**Context:** {envelope.context_summary}\n\n"
+                f"Per fnd-participants.md → Refuse, the scope remains available "
+                f"for other participants to pick up."
+            ),
+            confidence=envelope.confidence,
+            foundation_tag=["choice", "boundaries"],
+        )
+        write_entry(entry, repo)
+        console.print(
+            Panel(
+                f"[bold yellow]Task refused[/] by `{envelope.origin}` on `{scope}`\n"
+                f"[dim]Reason: {reason}[/]",
+                title=f"signal: acknowledgment → decision {entry.entry_id}",
+                border_style="yellow",
+            )
+        )
+        return entry
+
+    # Unstructured acknowledgment — surface only
+    console.print(
+        Panel(
+            f"[bold]Acknowledgment received[/]\n"
+            f"[bold]From:[/] `{envelope.origin}` → `{envelope.destination}`\n"
+            f"[bold]Acknowledged signals:[/] {', '.join(ack_signal_ids) or '—'}\n\n"
+            f"{envelope.context_summary}\n\n"
+            f"[dim]Payload:[/] {json.dumps(payload, indent=2)}",
+            title=f"signal: acknowledgment",
+            border_style="blue",
+        )
+    )
+    return None
+
+
+def handle_default(envelope: SignalEnvelope, repo: Repo) -> LedgerEntry | None:
+    """Default handler for signal types without a specialized handler.
+
+    Currently only `handoff` signals fall through to this handler (handoff
+    signals coming FROM other participants — the orchestrator's own outgoing
+    handoffs go to archive directly via write_outgoing_handoff). Surfaces
+    the signal to the console and archives it. No ledger entry.
     """
     console.print(
         Panel(
@@ -1112,7 +1331,7 @@ def handle_default(envelope: SignalEnvelope, repo: Repo) -> LedgerEntry | None:
             f"[bold]Signal id:[/] {envelope.signal_id}\n\n"
             f"{envelope.context_summary}\n\n"
             f"[dim]Payload:[/] {json.dumps(envelope.payload, indent=2)}\n\n"
-            f"[dim]No specialized handler for this type yet — archived for human review.[/]",
+            f"[dim]Archived for human review.[/]",
             title=f"signal: {envelope.type}",
             border_style="blue",
         )
@@ -1125,9 +1344,30 @@ SIGNAL_HANDLERS = {
     "boundary_change": handle_boundary_change,
     "error": handle_error,
     "handoff": handle_default,
-    "state_update": handle_default,
-    "acknowledgment": handle_default,
+    "state_update": handle_state_update,
+    "acknowledgment": handle_acknowledgment,
 }
+
+
+def validate_signal_lineage(envelope: SignalEnvelope) -> list[str]:
+    """Check that every signal_id in `envelope.lineage` exists in archive.
+
+    Returns a list of signal_ids that are referenced but not found. An empty
+    list means all lineage references are valid. Per fnd-signal.md, lineage
+    traceability is how participants verify the provenance of the signals
+    they act on.
+
+    Missing references are degraded signal, not fatal — the signal is still
+    processed, but the warning alerts the human that the lineage chain has
+    a gap.
+    """
+    _ensure_signal_dirs()
+    missing: list[str] = []
+    for sid in envelope.lineage:
+        archive_path = SIGNAL_ARCHIVE / f"{sid}.json"
+        if not archive_path.exists():
+            missing.append(sid)
+    return missing
 
 
 def process_signal(envelope: SignalEnvelope, repo: Repo | None) -> LedgerEntry | None:
@@ -1137,6 +1377,15 @@ def process_signal(envelope: SignalEnvelope, repo: Repo | None) -> LedgerEntry |
     fails), dispatched to the per-type handler, then moved to archive.
     Returns the ledger entry the handler wrote, if any.
     """
+    # Lineage validation: warn on missing references, don't block.
+    missing = validate_signal_lineage(envelope)
+    if missing:
+        console.print(
+            f"[yellow]lineage warning:[/] signal {envelope.signal_id} references "
+            f"{len(missing)} signal(s) not found in archive: {missing}. "
+            f"The signal will still be processed, but the lineage chain has a gap."
+        )
+
     write_signal_to_inbox(envelope)
     handler = SIGNAL_HANDLERS.get(envelope.type, handle_default)
     try:
@@ -1307,9 +1556,92 @@ def write_conflict_failure(
     return entry
 
 
+# ---------- Capability-based routing ----------
+
+# Maps file extensions to task types for infer_task_type(). The task type
+# is matched against each participant's `preferred_tasks` list from their
+# declaration. If no match is found, all active agents review the scope
+# (backward compatible broadcast behavior).
+_EXTENSION_TASK_TYPE: dict[str, str] = {
+    ".py": "code_review",
+    ".js": "code_review",
+    ".ts": "code_review",
+    ".go": "code_review",
+    ".rs": "code_review",
+    ".java": "code_review",
+    ".c": "code_review",
+    ".cpp": "code_review",
+    ".rb": "code_review",
+    ".sh": "code_review",
+    ".md": "writing_review",
+    ".txt": "writing_review",
+    ".rst": "writing_review",
+    ".json": "code_review",
+    ".yaml": "code_review",
+    ".yml": "code_review",
+    ".toml": "code_review",
+}
+
+
+def infer_task_type(scope_path: str) -> str | None:
+    """Map a scope path's file extension to a task type.
+
+    Returns None if the extension isn't recognized. Callers fall back to
+    broadcasting to all active agents when the task type is unknown.
+    """
+    ext = Path(scope_path).suffix.lower()
+    return _EXTENSION_TASK_TYPE.get(ext)
+
+
+def route_participants(
+    declarations: list[dict],
+    task_type: str | None,
+) -> list[dict]:
+    """Select agents whose `preferred_tasks` match the task type.
+
+    Per fnd-field.md: 'Routing considers declaration match, boundaries,
+    resource state, cost, and complementarity.' This implementation covers
+    the first criterion — declaration match via preferred_tasks. Resource
+    state is checked separately by the Resource breaker after review.
+
+    If task_type is None or no agents' preferred_tasks contain it, falls
+    back to all active agents (backward compatible). This ensures that
+    introducing capability routing never reduces the set of participants
+    below zero.
+
+    Agents are sorted by their capability_envelope score for the task type
+    (descending), with ties broken by declaration order. This is a mild
+    preference, not a hard filter — per fnd-field.md, 'when multiple
+    participants are materially fit, prefer the routing choice that broadens
+    stewardship, lineage, or failure profile.'
+    """
+    active = [
+        d for d in declarations
+        if d.get("participation_mode") == "active" and d.get("litellm_model")
+    ]
+
+    if not task_type:
+        return active
+
+    matched = [
+        d for d in active
+        if task_type in (d.get("preferred_tasks") or [])
+    ]
+
+    if not matched:
+        return active
+
+    # Sort by capability score for this task type (descending)
+    def score(d: dict) -> float:
+        return (d.get("capability_envelope") or {}).get(task_type, 0.0)
+
+    matched.sort(key=score, reverse=True)
+    return matched
+
+
 # ---------- Review loop ----------
 
-def run_review(scope_rel: str) -> int:
+def run_review(scope_rel: str, task_type: str | None = None) -> int:
     config = load_config()
     declarations = load_declarations()
     foundations_text = load_foundations(config.get("foundations_loaded_by_default", []))
@@ -1390,13 +1722,23 @@ def run_review(scope_rel: str) -> int:
         return 2
 
     repo = get_repo()
-    active_agents = [
-        d for d in declarations
-        if d.get("participation_mode") == "active" and d.get("litellm_model")
-    ]
+
+    # Capability-based routing: if a task_type was provided or inferred,
+    # prefer agents whose preferred_tasks match. Falls back to all active
+    # agents if no match or no task_type.
+    effective_task_type = task_type or infer_task_type(scope_rel)
+    active_agents = route_participants(declarations, effective_task_type)
     if not active_agents:
         console.print("[red]error:[/] no active agents with a litellm_model declared")
         return 2
+
+    routing_note = ""
+    if effective_task_type:
+        all_active = [d for d in declarations if d.get("participation_mode") == "active" and d.get("litellm_model")]
+        if len(active_agents) < len(all_active):
+            routing_note = f"\n[bold]Routing:[/] capability-routed for task type `{effective_task_type}`"
+        else:
+            routing_note = f"\n[bold]Routing:[/] broadcast (no agents matched `{effective_task_type}` in preferred_tasks)"
 
     console.print(
         Panel.fit(
@@ -1404,7 +1746,8 @@ def run_review(scope_rel: str) -> int:
             f"[bold]Intention:[/] {intention}\n"
             f"[bold]Role holder:[/] {role_holder}\n"
             f"[bold]Reviewers:[/] {', '.join(d['identifier'] for d in active_agents)}\n"
-            f"[bold]Conflict protocol:[/] {conflict_protocol}",
+            f"[bold]Conflict protocol:[/] {conflict_protocol}"
+            + routing_note,
             title="Coordination Review",
         )
     )
@@ -1513,6 +1856,40 @@ def run_review(scope_rel: str) -> int:
         )
         return 3
 
+    # ---- Resource circuit breaker ----
+    resource_failure = check_resource_breaker(config, scope_rel, role_holder, repo)
+    if resource_failure is not None:
+        console.print(
+            Panel(
+                f"[bold red]RESOURCE CIRCUIT BREAKER FIRED[/]\n\n"
+                f"{resource_failure.summary}\n\n"
+                f"Failure entry: [bold]{resource_failure.entry_id}[/]\n\n"
+                f"Per fnd-failure.md, disproportionate resource usage is a "
+                f"Balance concern. Consider rebalancing the participant roster "
+                f"or adjusting the scope.",
+                title="!!! resource breaker !!!",
+                border_style="red",
+            )
+        )
+        return 3
+
+    # Per-participant ceiling check
+    for decl in active_agents:
+        ceiling_failure = check_resource_ceiling(
+            decl["identifier"], declarations, scope_rel, role_holder, repo,
+        )
+        if ceiling_failure is not None:
+            console.print(
+                Panel(
+                    f"[bold red]RESOURCE CEILING BREACHED[/]\n\n"
+                    f"{ceiling_failure.summary}\n\n"
+                    f"Failure entry: [bold]{ceiling_failure.entry_id}[/]",
+                    title="!!! resource ceiling !!!",
+                    border_style="red",
+                )
+            )
+            return 3
+
     if all(r.get("error") is None for r in results):
         return 0
     return 1
@@ -1612,7 +1989,154 @@ def load_entry(entry_id: str) -> LedgerEntry:
     return LedgerEntry(**json.loads(matches[0].read_text(encoding="utf-8")))
 
 
-def run_repair(failure_entry_id: str, arbiter_id: str | None) -> int:
+VERIFICATION_SYSTEM_TEMPLATE = """You are a participant in a multi-AI-agent coordination.
+You are performing a VERIFICATION RERUN — a limited re-review of a scope
+artifact under conditions that have been modified by a repair entry.
+
+Your declaration:
+{declaration_json}
+
+Coordination intention:
+{intention}
+
+Foundations:
+{foundations}
+
+The repair entry below resolved a conflict or failure on this scope.
+Your task is to re-review the scope artifact under the resolved conditions
+and confirm whether the repair holds. Produce a `completion` entry with:
+  - verdict: one of approve, approve_with_conditions, reject, escalate
+  - prior_entries MUST include "{repair_entry_id}"
+  - summary: whether the scope is now fit under the repaired conditions
+  - detail: your full reasoning
+
+If the same issue that triggered the original failure recurs, that is
+strong signal that the repair did not hold. Return your honest assessment.
+
+{signal_docs}
+"""
+
+VERIFICATION_USER_TEMPLATE = """## Repair entry (the resolution being verified)
+
+```json
+{repair_json}
+```
+
+## Original failure entry
+
+```json
+{failure_json}
+```
+
+## Scope artifact
+
+```{lang}
+{scope_content}
+```
+
+Re-review the scope under the repaired conditions. Return one JSON ledger entry.
+"""
+
+
+def run_verification_rerun(
+    repair: LedgerEntry,
+    failure: LedgerEntry,
+    original_completions: list[LedgerEntry],
+    repo: Repo | None,
+    config: dict,
+    role_holder: str,
+) -> int:
+    """Per fnd-repair.md: 'Verification must either include a limited rerun
+    of the failed work under the resolved conditions, or explicitly record
+    why rerun is impossible or unsafe.'
+
+    This runs the original failing participants (extracted from the
+    completions linked to the failure) through a verification review,
+    with the repair entry as additional context.
+    """
+    declarations = load_declarations()
+    intention = config.get("intention", "")
+    foundations_text = load_foundations([
+        "fnd-preamble.md", "fnd-failure.md", "fnd-repair.md", "fnd-ledger.md"
+    ])
+
+    # Determine who to re-verify with: the original participants who produced
+    # the conflicting completions
+    original_authors = {e.author for e in original_completions}
+    verify_agents = [
+        d for d in declarations
+        if d["identifier"] in original_authors and d.get("litellm_model")
+    ]
+
+    if not verify_agents:
+        console.print(
+            "[yellow]No original reviewers available for verification rerun "
+            "(they may lack litellm_model). Recording verification as skipped.[/]"
+        )
+        return 0
+
+    scope_abs = ROOT / failure.scope
+    if not scope_abs.exists():
+        console.print(f"[red]error:[/] scope file not found for verification: {failure.scope}")
+        return 2
+    scope_content = scope_abs.read_text(encoding="utf-8")
+    lang = Path(failure.scope).suffix.lstrip(".") or "text"
+
+    any_failed = False
+    for decl in verify_agents:
+        author = decl["identifier"]
+        console.print(f"\n[cyan]→ verification rerun for {author}…[/]")
+
+        system = VERIFICATION_SYSTEM_TEMPLATE.format(
+            declaration_json=json.dumps(decl, indent=2),
+            intention=intention,
+            foundations=foundations_text,
+            repair_entry_id=repair.entry_id,
+            signal_docs=SIGNAL_ENVELOPE_DOCS,
+        )
+        user = VERIFICATION_USER_TEMPLATE.format(
+            repair_json=repair.model_dump_json(indent=2, exclude_none=True),
+            failure_json=failure.model_dump_json(indent=2, exclude_none=True),
+            lang=lang,
+            scope_content=scope_content,
+        )
+        base_messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+
+        entry, error = request_entry_with_retry(
+            decl=decl,
+            base_messages=base_messages,
+            expected_types=("completion",),
+            required_prior_entries=(repair.entry_id,),
+            scope_path=failure.scope,
+            repo=repo,
+            from_participant=role_holder,
+            handoff_task_type="verification_rerun",
+        )
+
+        if entry is None:
+            console.print(f"  [red]✗ {author} could not produce a verification entry:[/] {error}")
+            any_failed = True
+            continue
+
+        write_entry(entry, repo)
+        console.print(
+            f"  [green]✓[/] {author} verification: verdict={entry.verdict or '—'}, "
+            f"confidence={entry.confidence:.2f}"
+        )
+
+        if entry.verdict in ("reject", "escalate"):
+            console.print(
+                f"  [yellow]⚠ {author}'s verification suggests the repair may not hold.[/]"
+            )
+            any_failed = True
+
+    return 1 if any_failed else 0
+
+
+def run_repair(failure_entry_id: str, arbiter_id: str | None, verify: bool = False) -> int:
     config = load_config()
     declarations = load_declarations()
     intention = config.get("intention", "")
@@ -1763,6 +2287,21 @@ def run_repair(failure_entry_id: str, arbiter_id: str | None) -> int:
             border_style="green",
         )
     )
+
+    # ---- Verification rerun (opt-in via --verify) ----
+    if verify:
+        console.print("\n[bold cyan]Running verification rerun…[/]")
+        verify_result = run_verification_rerun(
+            repair, failure, completions, repo, config, role_holder,
+        )
+        if verify_result != 0:
+            console.print(
+                "[yellow]Verification rerun did not fully pass. "
+                "Check the new ledger entries for details.[/]"
+            )
+            return verify_result
+        console.print("[green]Verification rerun completed successfully.[/]")
+
     return 0
 
 
@@ -1917,12 +2456,19 @@ def write_mode_transition_decision(
             f"**Scope:** `{scope_path}`\n\n"
             f"**Reason:** {reason}\n\n"
             f"**Triggering entry:** {triggering_entry_id}\n\n"
-            f"Per fnd-field.md, this transition is recorded as a `decision` entry. "
-            f"In {to_mode} Mode, no participant holds the orchestrator role for this "
-            f"scope; participants self-select tasks based on their own assessment of "
-            f"where they can contribute. The orchestrator stays available for "
-            f"infrastructure-mode functions (validation, breaker monitoring) but "
-            f"does not route or assign."
+            f"Per fnd-field.md, this transition is recorded as a `decision` entry."
+            + (
+                f" In {to_mode} Mode, no participant holds the orchestrator role "
+                f"for this scope; participants self-select tasks based on their "
+                f"own assessment of where they can contribute."
+                if to_mode == "emergent"
+                else
+                f" The scope returns to {to_mode} mode. No active orchestrated "
+                f"workflows or open emergent questions remain. A participant may "
+                f"take the orchestrator role to begin new work on this scope."
+            )
+            + f" The orchestrator stays available for infrastructure-mode functions "
+            f"(validation, breaker monitoring) but does not route or assign."
         ),
         confidence=1.0,
         foundation_tag=["choice", "intention"],
@@ -2691,6 +3237,238 @@ def write_repetition_failure(
     return entry
 
 
+# ---------- Resource + Timeout circuit breakers ----------
+
+# Session-scoped token accumulator. Resets on script restart, which matches
+# the framework's concept of a "session." Keyed by participant identifier.
+_session_token_usage: dict[str, int] = {}
+
+
+def record_token_usage(participant_id: str, tokens: int) -> None:
+    """Accumulate total tokens used by a participant in this session."""
+    _session_token_usage[participant_id] = _session_token_usage.get(participant_id, 0) + tokens
+
+
+def check_resource_breaker(
+    config: dict,
+    scope_path: str,
+    role_holder: str,
+    repo: Repo | None,
+) -> LedgerEntry | None:
+    """The Resource circuit breaker.
+
+    Per fnd-failure.md: fires when one participant's resource consumption
+    exceeds N× the per-participant average (N = config circuit_breakers.resource_multiplier,
+    default 2.0). Also fires if a participant exceeds their declared
+    resource_ceiling.max_tokens_per_session.
+
+    Returns the failure entry if the breaker fires, None otherwise.
+    """
+    if not _session_token_usage:
+        return None
+
+    multiplier = config.get("circuit_breakers", {}).get("resource_multiplier", 2.0)
+    total = sum(_session_token_usage.values())
+    n_participants = len(_session_token_usage)
+    average = total / n_participants if n_participants > 0 else 0
+    threshold = average * multiplier
+
+    # Check per-participant average breach
+    offender_id: str | None = None
+    offender_tokens = 0
+    for pid, tokens in _session_token_usage.items():
+        if tokens > threshold and threshold > 0:
+            offender_id = pid
+            offender_tokens = tokens
+            break
+
+    if offender_id is None:
+        return None
+
+    entry = LedgerEntry(
+        entry_id=next_entry_id(),
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        author=role_holder,
+        type="failure",
+        scope=scope_path,
+        prior_entries=[],
+        summary=(
+            f"Resource circuit breaker fired: `{offender_id}` used {offender_tokens:,} "
+            f"tokens ({offender_tokens / average:.1f}× the {average:,.0f}-token average). "
+            f"Threshold: {multiplier}×."
+        ),
+        detail=(
+            f"# Resource circuit breaker fired\n\n"
+            f"**Scope:** `{scope_path}`\n\n"
+            f"**Offender:** `{offender_id}` — {offender_tokens:,} tokens\n\n"
+            f"**Average across {n_participants} participants:** {average:,.0f} tokens\n\n"
+            f"**Multiplier threshold:** {multiplier}× = {threshold:,.0f} tokens\n\n"
+            f"**Session usage by participant:**\n\n"
+            + "\n".join(f"- `{pid}`: {t:,} tokens" for pid, t in _session_token_usage.items())
+            + "\n\n"
+            f"Per fnd-failure.md, the Resource circuit breaker fires when one "
+            f"participant's consumption exceeds {multiplier}× the per-participant "
+            f"average. This is a Balance concern — disproportionate resource usage "
+            f"means the coordination is under-utilizing some participants and "
+            f"over-utilizing others."
+        ),
+        confidence=1.0,
+        foundation_tag=["balance"],
+    )
+    write_entry(entry, repo)
+    return entry
+
+
+def check_resource_ceiling(
+    participant_id: str,
+    declarations: list[dict],
+    scope_path: str,
+    role_holder: str,
+    repo: Repo | None,
+) -> LedgerEntry | None:
+    """Check if a participant has exceeded their declared max_tokens_per_session."""
+    tokens_used = _session_token_usage.get(participant_id, 0)
+    decl = next((d for d in declarations if d["identifier"] == participant_id), None)
+    if decl is None:
+        return None
+    ceiling = (decl.get("resource_ceiling") or {}).get("max_tokens_per_session")
+    if ceiling is None or tokens_used <= ceiling:
+        return None
+
+    entry = LedgerEntry(
+        entry_id=next_entry_id(),
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        author=role_holder,
+        type="failure",
+        scope=scope_path,
+        prior_entries=[],
+        summary=(
+            f"Resource ceiling breached: `{participant_id}` used {tokens_used:,} "
+            f"tokens, exceeding their declared ceiling of {ceiling:,}."
+        ),
+        detail=(
+            f"# Resource ceiling breached\n\n"
+            f"**Participant:** `{participant_id}`\n\n"
+            f"**Tokens used this session:** {tokens_used:,}\n\n"
+            f"**Declared ceiling:** {ceiling:,} (resource_ceiling.max_tokens_per_session)\n\n"
+            f"The participant's declaration sets a resource ceiling. Continuing to "
+            f"route work to this participant would violate their declared Boundaries."
+        ),
+        confidence=1.0,
+        foundation_tag=["balance", "boundaries"],
+    )
+    write_entry(entry, repo)
+    return entry
+
+
+def check_timeout_breaker(repo: Repo | None) -> list[LedgerEntry]:
+    """The Timeout circuit breaker.
+
+    Scans signal/archive/ for signals that have gone unacknowledged past
+    the destination participant's declared latency_tolerance_seconds.
+
+    A signal is "acknowledged" when there is an acknowledgment signal in
+    archive whose lineage includes the original signal's id.
+
+    Returns any failure entries written (one per timed-out signal).
+    """
+    _ensure_signal_dirs()
+    declarations = load_declarations()
+    decl_map = {d["identifier"]: d for d in declarations}
+
+    # Build set of all acknowledged signal ids
+    acked_ids: set[str] = set()
+    for p in sorted(SIGNAL_ARCHIVE.glob("*.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if data.get("type") == "acknowledgment":
+                for sid in data.get("lineage", []):
+                    acked_ids.add(sid)
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    now = datetime.now(timezone.utc)
+    failures: list[LedgerEntry] = []
+
+    for p in sorted(SIGNAL_ARCHIVE.glob("*.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+
+        sig_id = data.get("signal_id", "")
+        sig_type = data.get("type", "")
+        destination = data.get("destination", "")
+        ts_str = data.get("timestamp", "")
+
+        # Skip acknowledgments, handoffs, and already-acked signals
+        if sig_type in ("acknowledgment", "handoff"):
+            continue
+        if sig_id in acked_ids:
+            continue
+
+        # Check if destination has a latency tolerance
+        dest_decl = decl_map.get(destination)
+        if dest_decl is None:
+            continue
+        tolerance = (dest_decl.get("context_constraints") or {}).get("latency_tolerance_seconds")
+        if tolerance is None:
+            continue
+
+        # Parse timestamp and check
+        try:
+            sig_time = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+
+        elapsed = (now - sig_time).total_seconds()
+        if elapsed <= tolerance:
+            continue
+
+        # Timeout breaker fires for this signal
+        scope = (data.get("payload") or {}).get("scope", "unknown")
+        entry = LedgerEntry(
+            entry_id=next_entry_id(),
+            timestamp=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            author=destination,
+            type="failure",
+            scope=scope,
+            prior_entries=[],
+            summary=(
+                f"Timeout circuit breaker fired: signal {sig_id} to "
+                f"`{destination}` unacknowledged for {elapsed:.0f}s "
+                f"(tolerance: {tolerance}s)."
+            ),
+            detail=(
+                f"# Timeout circuit breaker fired\n\n"
+                f"**Signal id:** {sig_id}\n\n"
+                f"**Type:** {sig_type}\n\n"
+                f"**From:** `{data.get('origin', '?')}`\n\n"
+                f"**To:** `{destination}`\n\n"
+                f"**Sent:** {ts_str}\n\n"
+                f"**Elapsed:** {elapsed:.0f}s\n\n"
+                f"**Tolerance:** {tolerance}s "
+                f"(from `{destination}` declaration context_constraints."
+                f"latency_tolerance_seconds)\n\n"
+                f"Per fnd-failure.md, the Timeout breaker fires when a signal "
+                f"has not received acknowledgment within the declared latency "
+                f"tolerance of the receiving participant. This may indicate the "
+                f"participant is unresponsive (potential ungraceful departure) "
+                f"or that the signal was lost."
+            ),
+            confidence=1.0,
+            foundation_tag=["signal", "boundaries"],
+        )
+        write_entry(entry, repo)
+        failures.append(entry)
+        console.print(
+            f"[red]Timeout breaker fired:[/] signal {sig_id} → "
+            f"`{destination}` ({elapsed:.0f}s > {tolerance}s)"
+        )
+
+    return failures
+
+
 def run_synthesis(scope_rel: str) -> int:
     config = load_config()
     declarations = load_declarations()
@@ -2951,6 +3729,41 @@ def run_synthesis(scope_rel: str) -> int:
             })
 
     print_synthesis_aggregation(scope_rel, proposals, refusals, invitee_results)
+
+    # ---- Mode return: Emergent → Infrastructure ----
+    # After synthesis completes (all invitees responded), the field returns
+    # to Infrastructure mode. The scope is no longer under active
+    # orchestrated or emergent work — it's at rest. The transition is
+    # authored by the original role-holder who initiated synthesis; their
+    # identity persists in the local scope even though the role was released.
+    n_proposed = len(proposals)
+    n_refused = len(refusals)
+    n_failed = len([r for r in invitee_results if r.get("outcome") == "failed"])
+    verdicts = [p.verdict for p in proposals if p.verdict]
+    convergent = len(set(verdicts)) <= 1 and verdicts
+    verdict_summary = (
+        f"convergent ({verdicts[0]})" if convergent
+        else f"divergent ({', '.join(set(verdicts))})" if verdicts
+        else "no proposals"
+    )
+    synthesis_summary = (
+        f"Synthesis completed. {n_proposed} proposal(s), {n_refused} refusal(s), "
+        f"{n_failed} failure(s). Verdicts: {verdict_summary}."
+    )
+
+    mode_return_entry = write_mode_transition_decision(
+        repo, scope_rel,
+        from_mode="emergent",
+        to_mode="infrastructure",
+        reason=synthesis_summary,
+        triggering_entry_id=transition_entry.entry_id,
+        role_holder=role_holder,
+    )
+    console.print(
+        f"[dim]mode return: {mode_return_entry.entry_id} "
+        f"(emergent → infrastructure)[/]"
+    )
+
     return 0
 
 
@@ -3078,11 +3891,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="orchestrator", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_review = sub.add_parser("review", help="Send a scope artifact to all active agents")
+    p_review = sub.add_parser(
+        "review",
+        help="Send a scope artifact to agents (capability-routed if --task-type or inferred)",
+    )
     p_review.add_argument(
         "--scope",
         required=True,
         help="Path (relative to coordination/) of the artifact to review",
+    )
+    p_review.add_argument(
+        "--task-type",
+        default=None,
+        help="Task type for capability-based routing (e.g., code_review, writing_review). "
+             "If omitted, inferred from the scope file extension. Agents whose "
+             "preferred_tasks include this type are preferred; if none match, all "
+             "active agents review the scope (backward compatible broadcast).",
     )
 
     p_repair = sub.add_parser(
@@ -3097,6 +3921,14 @@ def main() -> int:
         "--arbiter",
         default=None,
         help="Identifier of the participant to act as arbiter (defaults to config.convergence.arbiter)",
+    )
+    p_repair.add_argument(
+        "--verify",
+        action="store_true",
+        help="After repair, automatically re-run the original failing reviewers "
+             "under the resolved conditions. Per fnd-repair.md: verification "
+             "must include a limited rerun or explicitly record why rerun is "
+             "impossible or unsafe.",
     )
 
     p_synth = sub.add_parser(
@@ -3218,9 +4050,9 @@ def main() -> int:
 
     args = parser.parse_args()
     if args.cmd == "review":
-        return run_review(args.scope)
+        return run_review(args.scope, task_type=args.task_type)
     if args.cmd == "repair":
-        return run_repair(args.failure_entry, args.arbiter)
+        return run_repair(args.failure_entry, args.arbiter, verify=args.verify)
     if args.cmd == "synthesize":
         return run_synthesis(args.scope)
     if args.cmd == "take-role":
@@ -3322,6 +4154,16 @@ def inbox_process() -> int:
     console.print(
         f"\n[bold]Done.[/] Processed: {n_processed}  ·  Failed: {n_failed}"
     )
+
+    # Run the Timeout circuit breaker after processing all pending signals
+    repo = get_repo()
+    timeout_failures = check_timeout_breaker(repo)
+    if timeout_failures:
+        console.print(
+            f"\n[bold red]Timeout breaker fired for {len(timeout_failures)} "
+            f"signal(s).[/] Run `python orchestrator.py ledger` to see failure entries."
+        )
+
     return 0 if n_failed == 0 else 1
 
 

@@ -619,27 +619,147 @@ fired). Synthesis handles agreement-with-fragmentation. They produce
 different entry shapes and use different field modes (repair stays in
 Orchestrated, synthesis transitions to Emergent).
 
-## What is intentionally not built yet
+## Capability-based routing
 
-| Feature | Notes |
-|---|---|
-| Capability-based routing within a single scope | All active agents review the same scope. The role-holder doesn't yet route different sub-tasks to different agents based on `preferred_tasks`. |
-| Resource and Timeout circuit breakers | Confidence and Repetition fire; Conflict fires via verdict mismatch. Resource (token usage > 2× per-participant average) and Timeout (signal unack'd within latency tolerance) are not yet wired. |
-| Verification rerun | The repair cycle records the resolution but does not automatically re-execute the failed review under the resolved conditions. |
-| Mode return | After Emergent synthesis completes, the orchestrator does not write a closing decision returning the scope to Orchestrated/Infrastructure mode. |
-| Specialized signal handlers for state_update/acknowledgment | Default handler records and surfaces them but doesn't act. Peer-to-peer state convergence and lineage tracing are future work. |
-| Signal lineage validation | Signal envelopes can claim arbitrary `lineage` arrays; the orchestrator doesn't yet verify referenced signals exist. |
-| Handoff envelopes capture prompt text | They capture the routing fact (who handed off what to whom) but not the system+user messages. Adding `payload.prompt` would make calls fully auditable. |
+Reviews are no longer broadcast to every active agent. The orchestrator
+now routes based on each participant's `preferred_tasks` declaration field.
 
-## Next iteration
+```bash
+python orchestrator.py review --scope scope/code/example_auth.py
+python orchestrator.py review --scope scope/code/example_auth.py --task-type code_review
+```
+
+**How routing works:**
+
+1. If `--task-type` is given, use it. Otherwise, infer from the file
+   extension (`.py` → `code_review`, `.md` → `writing_review`, etc.).
+2. Filter active agents to those whose `preferred_tasks` includes the
+   task type. Sort by `capability_envelope` score (descending).
+3. If no agents match (or no task type could be determined), fall back
+   to the original broadcast behavior — all active agents review.
+
+The review panel shows whether capability routing was applied or whether
+it fell back to broadcast.
+
+## Resource and Timeout circuit breakers
+
+Two new circuit breakers complete the set described in `fnd-failure.md`:
+
+**Resource breaker** — fires when one participant's token usage in the
+current session exceeds N× the per-participant average (N =
+`config.circuit_breakers.resource_multiplier`, default 2.0). Also fires
+if a participant exceeds their declared `resource_ceiling.max_tokens_per_session`.
+Token tracking is session-scoped (resets on script restart). The check
+runs after `run_review` completes, alongside the Conflict breaker.
+
+**Timeout breaker** — fires when a signal in `signal/archive/` has gone
+unacknowledged past the destination participant's declared
+`context_constraints.latency_tolerance_seconds`. The check runs at the
+end of `python orchestrator.py inbox process`. An unacknowledged signal
+past tolerance may indicate ungraceful departure.
+
+Both breakers write `failure` entries and surface loudly, consistent with
+the existing Conflict and Repetition breakers.
+
+## Verification rerun
+
+After a repair entry is written, the original failing reviewers can be
+automatically re-run under the resolved conditions:
+
+```bash
+python orchestrator.py repair --failure-entry 004 --arbiter claude-sonnet --verify
+```
+
+The `--verify` flag triggers a limited re-review: each original reviewer
+receives the repair entry and the scope artifact, and produces a new
+`completion` entry. If any reviewer's verdict is `reject` or `escalate`,
+the verification signals that the repair may not have held.
+
+Without `--verify`, the repair entry stands as-is (the default). Per
+`fnd-repair.md`: "Verification must either include a limited rerun of
+the failed work under the resolved conditions, or explicitly record why
+rerun is impossible or unsafe."
+
+## Mode return after Emergent synthesis
+
+After synthesis completes (all invitees have responded), the orchestrator
+now writes a closing `decision` entry transitioning the scope from
+Emergent back to Infrastructure mode. This entry:
+
+- Is authored by the original role-holder who initiated synthesis (their
+  identity persists even though the role was released during the transition
+  to Emergent mode)
+- Records whether proposals were convergent or divergent, the verdict
+  distribution, and the proposal/refusal/failure counts
+- Links back to the original mode-transition entry via `prior_entries`
+
+After mode return, the scope is at rest. A participant must `take-role`
+again to begin new orchestrated work on the same scope.
+
+## Signal lineage validation
+
+Signal envelopes can no longer claim arbitrary `lineage` arrays without
+scrutiny. When a signal is processed (via `process_signal` or
+`inbox process`), the orchestrator validates that every signal_id in the
+envelope's `lineage` array exists in `signal/archive/`.
+
+Missing references produce a yellow warning but do **not** block
+processing. A gap in the lineage chain is degraded signal, not a reason
+to drop a legitimate message.
+
+## Handoff envelopes capture prompt text
+
+Outgoing handoff envelopes can now include the full system+user messages
+sent to agents as `payload.prompt`. This is **opt-in** via config:
+
+```json
+{
+  "capture_prompt_in_handoff": true
+}
+```
+
+When enabled, every `write_outgoing_handoff` call stores the complete
+message list in the archive. This makes the handoff fully auditable:
+reading `git log` on `signal/archive/` shows not just *who handed off
+what to whom*, but the exact prompt text the agent received.
+
+Default is `false` because it substantially increases archive file sizes.
+
+## Specialized signal handlers for state_update and acknowledgment
+
+`state_update` and `acknowledgment` signals now have real handlers instead
+of falling through to the default:
+
+**state_update handler:**
+- If `payload.proposed_entry` contains a full ledger entry dict, validates
+  and writes it directly (the signal IS the participant's proposal per
+  fnd-ledger.md Write Protocol).
+- If `payload.scope` + `payload.state` are present, synthesizes an
+  `attempt` entry from the payload.
+- Otherwise, surfaces to console (backward compatible fallback).
+
+**acknowledgment handler:**
+- `payload.response = "accept"` or `"accept-with-conditions"` → writes
+  an `attempt` entry (per fnd-participants.md, acceptance is recorded as
+  an attempt entry).
+- `payload.response = "refuse-with-reason"` → writes a `decision` entry
+  recording the refusal so other participants can see the scope is available.
+- Validates that acknowledged signal ids in `lineage` exist in archive.
+- Unstructured acknowledgments (no `response` field) are surfaced to
+  console only.
+
+## Iteration history
 
 1. ✅ ~~Conflict breaker → repair cycle~~ (step 2)
 2. ✅ ~~Synthesis as collaborative emergent transition~~ (step 3)
 3. ✅ ~~Signal envelope inbox/archive~~ (step 4)
 4. ✅ ~~Orchestrator role as a thing held by participants~~ (step 5)
 5. ✅ ~~Hermes deployment, role transfer, self-select, Repetition breaker, handoff envelopes~~ (step 6)
-6. ✅ ~~Ledger summary generation~~ (step 7) — `python orchestrator.py ledger --summary`, wired into `run_repair` and `run_synthesis` user prompts so invited participants receive the compressed view per `fnd-ledger.md` → Read Protocol → Ledger Summary.
-7. Capability-based routing within a single scope (`preferred_tasks` from declarations)
-8. Resource + Timeout circuit breakers
-9. Specialized handlers for state_update and acknowledgment signals
-10. Mode return after Emergent synthesis (closing decision restoring Infrastructure/Orchestrated)
+6. ✅ ~~Ledger summary generation~~ (step 7) — `python orchestrator.py ledger --summary`
+7. ✅ ~~Capability-based routing~~ (step 8) — `review --task-type`, `route_participants()`, `infer_task_type()`
+8. ✅ ~~Resource + Timeout circuit breakers~~ (step 8) — session token tracking, resource breaker, timeout breaker via `inbox process`
+9. ✅ ~~Specialized handlers for state_update and acknowledgment signals~~ (step 8) — `handle_state_update()`, `handle_acknowledgment()`
+10. ✅ ~~Mode return after Emergent synthesis~~ (step 8) — closing decision: emergent → infrastructure
+11. ✅ ~~Signal lineage validation~~ (step 8) — `validate_signal_lineage()`, warn on missing refs
+12. ✅ ~~Handoff prompt capture~~ (step 8) — `payload.prompt` opt-in via `capture_prompt_in_handoff` config
+13. ✅ ~~Verification rerun~~ (step 8) — `repair --verify`, `run_verification_rerun()`
