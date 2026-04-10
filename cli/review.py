@@ -216,9 +216,10 @@ def run_review(scope_rel: str, task_type: str | None = None) -> int:
                 f"orchestrator.py is the tool the role-holder uses, not the "
                 f"orchestrator itself.\n\n"
                 f"Either:\n"
-                f"  1. [cyan]python orchestrator.py take-role --scope {scope_rel} "
-                f"--as <participant>[/] then re-run review\n"
-                f"  2. (future) Surface the scope as an open question via "
+                f"  1. [cyan]python orchestrator.py offer-role --scope {scope_rel}[/]\n"
+                f"     then [cyan]accept-role --scope {scope_rel} --as <participant>[/]\n"
+                f"     then re-run review\n"
+                f"  2. Surface the scope as an open question via "
                 f"`synthesize`-style emergent transition and let participants "
                 f"self-select",
                 title="no orchestrator",

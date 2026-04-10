@@ -275,8 +275,9 @@ def run_repair(failure_entry_id: str, arbiter_id: str | None, verify: bool = Fal
                 f"scope. Choosing an arbiter and routing the repair task to them "
                 f"is an orchestration decision — it cannot be done without a "
                 f"role-holder.\n\n"
-                f"Take the role first:\n"
-                f"  [cyan]python orchestrator.py take-role --scope {failure.scope} "
+                f"Offer and accept the role first:\n"
+                f"  [cyan]python orchestrator.py offer-role --scope {failure.scope}[/]\n"
+                f"  [cyan]python orchestrator.py accept-role --scope {failure.scope} "
                 f"--as <participant>[/]",
                 title="no orchestrator",
                 border_style="red",

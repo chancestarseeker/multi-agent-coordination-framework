@@ -42,7 +42,7 @@ from cli.ledger import print_ledger, print_ledger_summary
 from cli.review import run_review
 from cli.repair import run_repair
 from cli.synthesis import run_synthesis
-from cli.roles import cmd_take_role, cmd_release_role, cmd_self_select
+from cli.roles import cmd_offer_role, cmd_accept_role, cmd_refuse_role, cmd_stepdown, cmd_self_select
 
 
 # ---------- Inbox subcommands ----------
@@ -194,60 +194,85 @@ def main() -> int:
         help="Path (relative to coordination/) of the artifact to synthesize",
     )
 
-    p_take = sub.add_parser(
-        "take-role",
-        help="Declare that a participant takes the orchestrator role for a scope",
+    p_offer = sub.add_parser(
+        "offer-role",
+        help="Field offers the orchestrator role to the best candidate (or a named participant)",
     )
-    p_take.add_argument(
+    p_offer.add_argument(
         "--scope",
         required=True,
         help="Path (relative to coordination/) of the scope to orchestrate",
     )
-    p_take.add_argument(
-        "--as",
-        dest="as_participant",
-        required=True,
-        help="Identifier of the participant taking the role",
-    )
-    p_take.add_argument(
-        "--acknowledging",
+    p_offer.add_argument(
+        "--to",
+        dest="to_participant",
         default=None,
-        help="Optional: entry_id of a release_orchestrator entry being acknowledged. "
-             "Use this when the take is the second step of a transfer.",
+        help="Offer to a specific participant. If omitted, the field selects "
+             "the best candidate based on declarations.",
     )
 
-    p_release = sub.add_parser(
-        "release-role",
-        help="Declare that a participant releases the orchestrator role for a scope",
+    p_accept = sub.add_parser(
+        "accept-role",
+        help="Participant accepts the offered orchestrator role for a scope",
     )
-    p_release.add_argument(
+    p_accept.add_argument(
         "--scope",
         required=True,
-        help="Path (relative to coordination/) of the scope to release",
+        help="Path (relative to coordination/) of the scope",
     )
-    p_release.add_argument(
+    p_accept.add_argument(
         "--as",
         dest="as_participant",
         required=True,
-        help="Identifier of the participant releasing the role (must be the current holder)",
+        help="Identifier of the participant accepting the role",
     )
-    p_release.add_argument(
+
+    p_refuse = sub.add_parser(
+        "refuse-role",
+        help="Participant refuses the offered orchestrator role",
+    )
+    p_refuse.add_argument(
+        "--scope",
+        required=True,
+        help="Path (relative to coordination/) of the scope",
+    )
+    p_refuse.add_argument(
+        "--as",
+        dest="as_participant",
+        required=True,
+        help="Identifier of the participant refusing the role",
+    )
+    p_refuse.add_argument(
         "--reason",
-        default="voluntary release",
-        help="Free-text reason for release",
+        required=True,
+        help="Why the participant is refusing (refusal is signal, not failure)",
     )
-    p_release.add_argument(
+
+    p_stepdown = sub.add_parser(
+        "stepdown",
+        help="Voluntary departure from the orchestrator role (framed as boundary_change)",
+    )
+    p_stepdown.add_argument(
+        "--scope",
+        required=True,
+        help="Path (relative to coordination/) of the scope",
+    )
+    p_stepdown.add_argument(
+        "--as",
+        dest="as_participant",
+        required=True,
+        help="Identifier of the participant stepping down",
+    )
+    p_stepdown.add_argument(
+        "--reason",
+        default="voluntary stepdown",
+        help="Why the participant is stepping down",
+    )
+    p_stepdown.add_argument(
         "--snapshot",
         default=None,
-        help="State snapshot for transfer per fnd-participants.md -> Transfer. "
+        help="State snapshot per fnd-participants.md -> Relinquish. "
              "String literal, or @path/to/file.md to read from disk.",
-    )
-    p_release.add_argument(
-        "--to",
-        dest="transferring_to",
-        default=None,
-        help="Identifier of the participant the role is being transferred to. "
-             "They must acknowledge via take-role --acknowledging.",
     )
 
     p_self = sub.add_parser(
@@ -308,13 +333,14 @@ def main() -> int:
         return run_repair(args.failure_entry, args.arbiter, verify=args.verify)
     if args.cmd == "synthesize":
         return run_synthesis(args.scope)
-    if args.cmd == "take-role":
-        return cmd_take_role(args.scope, args.as_participant, args.acknowledging)
-    if args.cmd == "release-role":
-        return cmd_release_role(
-            args.scope, args.as_participant, args.reason,
-            args.snapshot, args.transferring_to,
-        )
+    if args.cmd == "offer-role":
+        return cmd_offer_role(args.scope, args.to_participant)
+    if args.cmd == "accept-role":
+        return cmd_accept_role(args.scope, args.as_participant)
+    if args.cmd == "refuse-role":
+        return cmd_refuse_role(args.scope, args.as_participant, args.reason)
+    if args.cmd == "stepdown":
+        return cmd_stepdown(args.scope, args.as_participant, args.reason, args.snapshot)
     if args.cmd == "self-select":
         return cmd_self_select(args.scope, args.as_participant, args.reason)
     if args.cmd == "ledger":

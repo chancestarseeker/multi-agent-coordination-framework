@@ -119,11 +119,15 @@ class TestLedgerEntry:
         with pytest.raises(Exception):
             LedgerEntry(**_make_entry(type="completion", verdict="maybe"))
 
-    def test_valid_role_action(self):
-        e = LedgerEntry(**_make_entry(role_action="take_orchestrator"))
-        assert e.role_action == "take_orchestrator"
+    def test_valid_role_actions(self):
+        for action in ("offer_orchestrator", "accept_orchestrator", "refuse_orchestrator",
+                       "rotate_orchestrator", "stepdown_orchestrator"):
+            e = LedgerEntry(**_make_entry(role_action=action))
+            assert e.role_action == action
 
     def test_invalid_role_action_rejected(self):
+        with pytest.raises(Exception):
+            LedgerEntry(**_make_entry(role_action="take_orchestrator"))
         with pytest.raises(Exception):
             LedgerEntry(**_make_entry(role_action="steal_orchestrator"))
 
