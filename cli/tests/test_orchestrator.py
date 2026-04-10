@@ -1,4 +1,4 @@
-"""Tests for orchestrator.py — covers schema validation, circuit breakers,
+"""Tests for the orchestrator modules — covers schema validation, circuit breakers,
 routing logic, JSON extraction, ledger summary, and path containment.
 
 All tests are runnable without LLM API keys.
@@ -15,21 +15,22 @@ from typing import Any
 
 import pytest
 
-# We need to make the orchestrator importable without litellm actually
-# connecting to anything. The import itself is fine — litellm is only
-# called inside request_entry_with_retry.
-import importlib.util
-
-spec = importlib.util.spec_from_file_location(
-    "orchestrator",
-    str(Path(__file__).resolve().parent.parent / "orchestrator.py"),
+# Import from the decomposed modules
+from cli.schema import LedgerEntry, SignalEnvelope, VALID_ENTRY_TYPES, VALID_SIGNAL_TYPES
+from cli.config import resolve_scope
+from cli.parsing import extract_all_json, extract_json, classify_json_object
+from cli.review import route_participants, infer_task_type
+from cli.breakers import (
+    detect_verdict_conflict,
+    repetition_breaker_should_fire,
+    record_token_usage,
+    check_resource_breaker,
+    _session_token_usage,
 )
-orch = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(orch)
-# Fix Pydantic deferred annotations
-orch.Any = Any
-orch.SignalEnvelope.model_rebuild()
-orch.LedgerEntry.model_rebuild()
+from cli.signals import validate_signal_lineage
+import cli.ledger as ledger_mod
+import cli.config as config_mod
+import cli.signals as signals_mod
 
 
 # ---------- Fixtures ----------
@@ -40,10 +41,14 @@ def tmp_ledger(tmp_path):
     """Provide a temp LEDGER_DIR and patch the module to use it."""
     ledger = tmp_path / "ledger" / "entries"
     ledger.mkdir(parents=True)
-    original = orch.LEDGER_DIR
-    orch.LEDGER_DIR = ledger
+    original = ledger_mod.LEDGER_DIR
+    ledger_mod.LEDGER_DIR = ledger
+    # Also patch config_mod since some functions import LEDGER_DIR from there
+    orig_config = config_mod.LEDGER_DIR
+    config_mod.LEDGER_DIR = ledger
     yield ledger
-    orch.LEDGER_DIR = original
+    ledger_mod.LEDGER_DIR = original
+    config_mod.LEDGER_DIR = orig_config
 
 
 @pytest.fixture()
@@ -53,12 +58,17 @@ def tmp_signals(tmp_path):
     archive = tmp_path / "signal" / "archive"
     inbox.mkdir(parents=True)
     archive.mkdir(parents=True)
-    orig_inbox, orig_archive = orch.SIGNAL_INBOX, orch.SIGNAL_ARCHIVE
-    orch.SIGNAL_INBOX = inbox
-    orch.SIGNAL_ARCHIVE = archive
+    orig_inbox_sig, orig_archive_sig = signals_mod.SIGNAL_INBOX, signals_mod.SIGNAL_ARCHIVE
+    orig_inbox_cfg, orig_archive_cfg = config_mod.SIGNAL_INBOX, config_mod.SIGNAL_ARCHIVE
+    signals_mod.SIGNAL_INBOX = inbox
+    signals_mod.SIGNAL_ARCHIVE = archive
+    config_mod.SIGNAL_INBOX = inbox
+    config_mod.SIGNAL_ARCHIVE = archive
     yield inbox, archive
-    orch.SIGNAL_INBOX = orig_inbox
-    orch.SIGNAL_ARCHIVE = orig_archive
+    signals_mod.SIGNAL_INBOX = orig_inbox_sig
+    signals_mod.SIGNAL_ARCHIVE = orig_archive_sig
+    config_mod.SIGNAL_INBOX = orig_inbox_cfg
+    config_mod.SIGNAL_ARCHIVE = orig_archive_cfg
 
 
 def _write_entry(ledger_dir: Path, entry: dict) -> None:
@@ -88,34 +98,34 @@ def _make_entry(**overrides) -> dict:
 
 class TestLedgerEntry:
     def test_valid_entry(self):
-        e = orch.LedgerEntry(**_make_entry())
+        e = LedgerEntry(**_make_entry())
         assert e.entry_id == "001"
 
     def test_invalid_type_rejected(self):
         with pytest.raises(Exception):
-            orch.LedgerEntry(**_make_entry(type="bogus"))
+            LedgerEntry(**_make_entry(type="bogus"))
 
     def test_confidence_out_of_range(self):
         with pytest.raises(Exception):
-            orch.LedgerEntry(**_make_entry(confidence=1.5))
+            LedgerEntry(**_make_entry(confidence=1.5))
         with pytest.raises(Exception):
-            orch.LedgerEntry(**_make_entry(confidence=-0.1))
+            LedgerEntry(**_make_entry(confidence=-0.1))
 
     def test_valid_verdict(self):
-        e = orch.LedgerEntry(**_make_entry(type="completion", verdict="approve"))
+        e = LedgerEntry(**_make_entry(type="completion", verdict="approve"))
         assert e.verdict == "approve"
 
     def test_invalid_verdict_rejected(self):
         with pytest.raises(Exception):
-            orch.LedgerEntry(**_make_entry(type="completion", verdict="maybe"))
+            LedgerEntry(**_make_entry(type="completion", verdict="maybe"))
 
     def test_valid_role_action(self):
-        e = orch.LedgerEntry(**_make_entry(role_action="take_orchestrator"))
+        e = LedgerEntry(**_make_entry(role_action="take_orchestrator"))
         assert e.role_action == "take_orchestrator"
 
     def test_invalid_role_action_rejected(self):
         with pytest.raises(Exception):
-            orch.LedgerEntry(**_make_entry(role_action="steal_orchestrator"))
+            LedgerEntry(**_make_entry(role_action="steal_orchestrator"))
 
 
 # ---------- JSON extraction ----------
@@ -124,20 +134,20 @@ class TestLedgerEntry:
 class TestExtractJson:
     def test_fenced_json(self):
         text = 'Some text\n```json\n{"entry_id": "001", "type": "decision"}\n```\nmore'
-        result = orch.extract_all_json(text)
+        result = extract_all_json(text)
         assert len(result) >= 1
         assert result[0]["entry_id"] == "001"
 
     def test_bare_json(self):
         text = 'prefix {"entry_id": "002"} suffix'
-        result = orch.extract_all_json(text)
+        result = extract_all_json(text)
         assert any(obj.get("entry_id") == "002" for obj in result)
 
     def test_classify_entry_vs_signal(self):
         entry_obj = {"entry_id": "001", "type": "decision"}
         signal_obj = {"signal_id": "sig-001", "type": "query"}
-        assert orch.classify_json_object(entry_obj) == "entry"
-        assert orch.classify_json_object(signal_obj) == "signal"
+        assert classify_json_object(entry_obj) == "entry"
+        assert classify_json_object(signal_obj) == "signal"
 
 
 # ---------- Capability routing ----------
@@ -168,40 +178,40 @@ class TestRouteParticipants:
     ]
 
     def test_routes_to_matching_preferred_tasks(self):
-        result = orch.route_participants(self.DECLS, "code_review")
+        result = route_participants(self.DECLS, "code_review")
         assert [d["identifier"] for d in result] == ["agent-code"]
 
     def test_routes_writing_to_writing_agent(self):
-        result = orch.route_participants(self.DECLS, "writing_review")
+        result = route_participants(self.DECLS, "writing_review")
         assert [d["identifier"] for d in result] == ["agent-write"]
 
     def test_falls_back_to_broadcast_on_unknown_type(self):
-        result = orch.route_participants(self.DECLS, "unknown_type")
+        result = route_participants(self.DECLS, "unknown_type")
         ids = [d["identifier"] for d in result]
         assert "agent-code" in ids and "agent-write" in ids
 
     def test_falls_back_to_broadcast_on_none(self):
-        result = orch.route_participants(self.DECLS, None)
+        result = route_participants(self.DECLS, None)
         assert len(result) == 2  # excludes observer
 
     def test_excludes_observers(self):
-        result = orch.route_participants(self.DECLS, None)
+        result = route_participants(self.DECLS, None)
         ids = [d["identifier"] for d in result]
         assert "observer" not in ids
 
 
 class TestInferTaskType:
     def test_python(self):
-        assert orch.infer_task_type("scope/code/foo.py") == "code_review"
+        assert infer_task_type("scope/code/foo.py") == "code_review"
 
     def test_markdown(self):
-        assert orch.infer_task_type("docs/README.md") == "writing_review"
+        assert infer_task_type("docs/README.md") == "writing_review"
 
     def test_unknown_extension(self):
-        assert orch.infer_task_type("data/file.xyz") is None
+        assert infer_task_type("data/file.xyz") is None
 
     def test_no_extension(self):
-        assert orch.infer_task_type("Makefile") is None
+        assert infer_task_type("Makefile") is None
 
 
 # ---------- Circuit breakers ----------
@@ -210,44 +220,44 @@ class TestInferTaskType:
 class TestConflictDetection:
     def test_same_verdict_no_conflict(self):
         entries = [
-            orch.LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
-            orch.LedgerEntry(**_make_entry(entry_id="002", type="completion", verdict="approve")),
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+            LedgerEntry(**_make_entry(entry_id="002", type="completion", verdict="approve")),
         ]
-        assert orch.detect_verdict_conflict(entries) is False
+        assert detect_verdict_conflict(entries) is False
 
     def test_different_verdicts_conflict(self):
         entries = [
-            orch.LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
-            orch.LedgerEntry(**_make_entry(entry_id="002", type="completion", verdict="reject")),
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+            LedgerEntry(**_make_entry(entry_id="002", type="completion", verdict="reject")),
         ]
-        assert orch.detect_verdict_conflict(entries) is True
+        assert detect_verdict_conflict(entries) is True
 
     def test_no_judgment_excluded(self):
         entries = [
-            orch.LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
-            orch.LedgerEntry(**_make_entry(entry_id="002", type="completion", verdict="no_judgment")),
+            LedgerEntry(**_make_entry(entry_id="001", type="completion", verdict="approve")),
+            LedgerEntry(**_make_entry(entry_id="002", type="completion", verdict="no_judgment")),
         ]
-        assert orch.detect_verdict_conflict(entries) is False
+        assert detect_verdict_conflict(entries) is False
 
 
 class TestResourceBreaker:
     def setup_method(self):
-        orch._session_token_usage.clear()
+        _session_token_usage.clear()
 
     def test_even_usage_no_fire(self):
-        orch.record_token_usage("a", 1000)
-        orch.record_token_usage("b", 1000)
-        orch.record_token_usage("c", 1000)
-        result = orch.check_resource_breaker(
+        record_token_usage("a", 1000)
+        record_token_usage("b", 1000)
+        record_token_usage("c", 1000)
+        result = check_resource_breaker(
             {"circuit_breakers": {"resource_multiplier": 2.0}}, "s", "h", None
         )
         assert result is None
 
     def test_skewed_usage_fires(self, tmp_ledger):
-        orch.record_token_usage("a", 100)
-        orch.record_token_usage("b", 100)
-        orch.record_token_usage("c", 20000)
-        result = orch.check_resource_breaker(
+        record_token_usage("a", 100)
+        record_token_usage("b", 100)
+        record_token_usage("c", 20000)
+        result = check_resource_breaker(
             {"circuit_breakers": {"resource_multiplier": 2.0}}, "s", "h", None
         )
         assert result is not None
@@ -255,7 +265,7 @@ class TestResourceBreaker:
         assert "balance" in result.foundation_tag
 
     def test_empty_usage_no_fire(self):
-        result = orch.check_resource_breaker(
+        result = check_resource_breaker(
             {"circuit_breakers": {"resource_multiplier": 2.0}}, "s", "h", None
         )
         assert result is None
@@ -267,8 +277,8 @@ class TestRepetitionBreaker:
             _write_entry(tmp_ledger, _make_entry(
                 entry_id=f"{i+1:03d}", type="failure", author=f"agent-{i}",
             ))
-        entries = orch.entries_for_scope("scope/test.py")
-        assert orch.repetition_breaker_should_fire(entries) is True
+        entries = ledger_mod.entries_for_scope("scope/test.py")
+        assert repetition_breaker_should_fire(entries) is True
 
     def test_does_not_fire_with_repair(self, tmp_ledger):
         for i in range(3):
@@ -280,9 +290,9 @@ class TestRepetitionBreaker:
             entry_id="004", type="repair", author="arbiter",
             prior_entries=["001"],
         ))
-        entries = orch.entries_for_scope("scope/test.py")
+        entries = ledger_mod.entries_for_scope("scope/test.py")
         # Only 2 unresolved now (002, 003)
-        assert orch.repetition_breaker_should_fire(entries) is False
+        assert repetition_breaker_should_fire(entries) is False
 
 
 # ---------- Signal lineage validation ----------
@@ -290,25 +300,25 @@ class TestRepetitionBreaker:
 
 class TestSignalLineageValidation:
     def test_missing_lineage_detected(self, tmp_signals):
-        env = orch.SignalEnvelope(
+        env = SignalEnvelope(
             signal_id="sig-test", origin="a", destination="b",
             timestamp="2026-01-01T00:00:00Z", type="query",
             payload={}, context_summary="test", confidence=0.5,
             lineage=["sig-missing-1", "sig-missing-2"],
         )
-        missing = orch.validate_signal_lineage(env)
+        missing = validate_signal_lineage(env)
         assert len(missing) == 2
 
     def test_present_lineage_ok(self, tmp_signals):
         inbox, archive = tmp_signals
         (archive / "sig-exists.json").write_text("{}")
-        env = orch.SignalEnvelope(
+        env = SignalEnvelope(
             signal_id="sig-test", origin="a", destination="b",
             timestamp="2026-01-01T00:00:00Z", type="query",
             payload={}, context_summary="test", confidence=0.5,
             lineage=["sig-exists"],
         )
-        missing = orch.validate_signal_lineage(env)
+        missing = validate_signal_lineage(env)
         assert len(missing) == 0
 
 
@@ -317,14 +327,14 @@ class TestSignalLineageValidation:
 
 class TestLedgerSummary:
     def test_empty_ledger(self, tmp_ledger):
-        result = orch.summarize_ledger()
+        result = ledger_mod.summarize_ledger()
         assert "empty" in result.lower()
 
     def test_failure_preserved_in_full(self, tmp_ledger):
         _write_entry(tmp_ledger, _make_entry(
             entry_id="001", type="failure", detail="important detail here",
         ))
-        result = orch.summarize_ledger()
+        result = ledger_mod.summarize_ledger()
         assert "important detail here" in result
         assert "**failure**" in result
 
@@ -333,14 +343,14 @@ class TestLedgerSummary:
             entry_id="001", type="completion", verdict="approve",
             detail="should not appear in summary",
         ))
-        result = orch.summarize_ledger(active_scope=None)
+        result = ledger_mod.summarize_ledger(active_scope=None)
         assert "should not appear in summary" not in result
 
     def test_completion_shown_with_active_scope(self, tmp_ledger):
         _write_entry(tmp_ledger, _make_entry(
             entry_id="001", type="completion", verdict="approve",
         ))
-        result = orch.summarize_ledger(active_scope="scope/test.py")
+        result = ledger_mod.summarize_ledger(active_scope="scope/test.py")
         assert "**001**" in result  # bold = active scope entry
         assert "verdict=approve" in result
 
@@ -353,14 +363,14 @@ class TestResolveScope:
         # scope/code is a valid relative path within ROOT
         # We just test that it doesn't raise for a non-traversal path
         try:
-            orch.resolve_scope("scope/code/example_auth.py")
+            resolve_scope("scope/code/example_auth.py")
         except ValueError:
             pytest.fail("resolve_scope rejected a valid scope path")
 
     def test_traversal_rejected(self):
         with pytest.raises(ValueError, match="escapes"):
-            orch.resolve_scope("../../etc/passwd")
+            resolve_scope("../../etc/passwd")
 
     def test_dot_dot_in_middle_rejected(self):
         with pytest.raises(ValueError, match="escapes"):
-            orch.resolve_scope("scope/../../etc/shadow")
+            resolve_scope("scope/../../etc/shadow")
