@@ -7,9 +7,9 @@ roles.py, signals.py, breakers.py, ledger.py, retry.py, parsing.py,
 prompts.py, config.py, schema.py.
 
 Run:
-    python orchestrator.py review --scope scope/code/example_auth.py
-    python orchestrator.py offer-role --scope scope/code/example_auth.py
-    python orchestrator.py ledger --summary
+    orchestrator review --scope scope/code/example_auth.py
+    orchestrator offer-role --scope scope/code/example_auth.py
+    orchestrator ledger --summary
 """
 
 from __future__ import annotations
@@ -39,7 +39,10 @@ from cli.ledger import print_ledger, print_ledger_summary
 from cli.review import run_review
 from cli.repair import run_repair
 from cli.synthesis import run_synthesis
-from cli.roles import cmd_offer_role, cmd_accept_role, cmd_refuse_role, cmd_stepdown, cmd_self_select
+from cli.roles import (
+    cmd_offer_role, cmd_accept_role, cmd_refuse_role,
+    cmd_stepdown, cmd_withdraw_offer, cmd_self_select,
+)
 
 
 # ---------- Inbox subcommands ----------
@@ -129,7 +132,7 @@ def inbox_process() -> int:
     if timeout_failures:
         console.print(
             f"\n[bold red]Timeout breaker fired for {len(timeout_failures)} "
-            f"signal(s).[/] Run `python orchestrator.py ledger` to see failure entries."
+            f"signal(s).[/] Run `orchestrator ledger` to see failure entries."
         )
 
     return 0 if n_failed == 0 else 1
@@ -272,6 +275,21 @@ def main() -> int:
              "String literal, or @path/to/file.md to read from disk.",
     )
 
+    p_withdraw = sub.add_parser(
+        "withdraw-offer",
+        help="Withdraw a pending role offer that will never be accepted (unsticks dead state)",
+    )
+    p_withdraw.add_argument(
+        "--scope",
+        required=True,
+        help="Path (relative to coordination/) of the scope",
+    )
+    p_withdraw.add_argument(
+        "--reason",
+        default="offered participant unresponsive",
+        help="Why the offer is being withdrawn",
+    )
+
     p_self = sub.add_parser(
         "self-select",
         help="A participant declares they are picking up scope from the ledger (Emergent Mode)",
@@ -338,6 +356,8 @@ def main() -> int:
         return cmd_refuse_role(args.scope, args.as_participant, args.reason)
     if args.cmd == "stepdown":
         return cmd_stepdown(args.scope, args.as_participant, args.reason, args.snapshot)
+    if args.cmd == "withdraw-offer":
+        return cmd_withdraw_offer(args.scope, args.reason)
     if args.cmd == "self-select":
         return cmd_self_select(args.scope, args.as_participant, args.reason)
     if args.cmd == "ledger":

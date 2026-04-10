@@ -102,7 +102,12 @@ def finalize_entry(raw: dict, author: str, scope_path: str) -> LedgerEntry:
     """
     raw["entry_id"] = next_entry_id()
     raw["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    raw.setdefault("author", author)
+    # Author is set unconditionally — not setdefault. Per fnd-field.md:
+    # "Write to the ledger on behalf of a participant without that
+    # participant's signal" is forbidden. A malicious agent embedding
+    # proposed_entry.author="human-lead" in a state_update signal
+    # would forge entries attributed to the human if we used setdefault.
+    raw["author"] = author
     raw.setdefault("scope", scope_path)
     raw.setdefault("prior_entries", [])
     raw.setdefault("foundation_tag", [])

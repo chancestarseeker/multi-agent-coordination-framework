@@ -59,15 +59,32 @@ def write_confidence_failure(
     return failure
 
 
-def detect_verdict_conflict(entries: list[LedgerEntry]) -> bool:
-    """The Conflict breaker, in its first form.
+def _normalize_verdict(verdict: str) -> str:
+    """Normalize verdicts into families for conflict detection.
 
-    Two or more completion entries on the same scope with different verdicts
-    is treated as incompatible state proposals (per fnd-ledger.md write
-    protocol). `no_judgment` and `None` do not participate in the comparison
-    — they are abstentions, not positions.
+    Per deepseek-r1 review: `approve` and `approve_with_conditions` are
+    compatible positions (both approve the artifact). Treating them as
+    incompatible forces unnecessary repair cycles. We normalize them into
+    families: approve-family vs non-approve.
     """
-    verdicts = {e.verdict for e in entries if e.verdict and e.verdict != "no_judgment"}
+    if verdict in ("approve", "approve_with_conditions"):
+        return "approve_family"
+    return verdict
+
+
+def detect_verdict_conflict(entries: list[LedgerEntry]) -> bool:
+    """The Conflict breaker.
+
+    Two or more completion entries on the same scope with verdicts in
+    different families are treated as incompatible state proposals.
+    `approve` and `approve_with_conditions` are in the same family
+    (both approve). `no_judgment` and `None` are abstentions.
+    """
+    verdicts = {
+        _normalize_verdict(e.verdict)
+        for e in entries
+        if e.verdict and e.verdict != "no_judgment"
+    }
     return len(verdicts) >= 2
 
 
@@ -124,7 +141,7 @@ def write_repetition_failure(
             f"This entry pauses routing on this scope. To proceed:\n\n"
             f"  1. Run repair on each unresolved failure above:\n"
             + "\n".join(
-                f"     [cyan]python orchestrator.py repair --failure-entry {e.entry_id}[/]"
+                f"     [cyan]orchestrator repair --failure-entry {e.entry_id}[/]"
                 for e in unresolved_failures
             )
             + "\n\n"
