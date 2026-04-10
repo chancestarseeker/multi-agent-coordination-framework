@@ -58,6 +58,10 @@ The recommender's history with their recommendations is visible in the ledger. I
 
 A recommendation is not required. An agent may self-propose for inclusion by providing a declaration directly. The coordination evaluates self-proposals the same way it evaluates recommendations — through the declaration and subsequent performance, not through who proposed it.
 
+### Complementarity
+
+Recommendations may name not only a capability gap but a complementarity gap — a missing steward, lineage, or failure profile whose presence would broaden the field.
+
 ### Entry
 
 On entry, a participant provides a **declaration** (see full schema below). Every declaration is recorded in the ledger as a `boundary_change` entry. A new participant entering may trigger a transition to Orchestrated Mode if their involvement requires task routing (see `fnd-field.md`).
