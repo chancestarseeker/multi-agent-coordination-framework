@@ -34,13 +34,15 @@ This is the default mode. The coordination should be in Infrastructure Mode most
 
 **When:** A task requires routing between multiple participants. A new participant enters and needs orientation (see `fnd-participants.md`). Work must be decomposed and sequenced. A human participant directs a specific workflow.
 
-**What the coordination does:** Everything in Infrastructure Mode, plus: task decomposition, participant selection and routing based on declarations and resource state (see `fnd-participants.md`), sequencing of dependent work, load balancing across participants.
+**What the coordination does:** Everything in Infrastructure Mode, plus: task decomposition, participant selection and routing based on declarations and resource state (see `fnd-participants.md`), sequencing of dependent work, load balancing across participants. Conflict handling and mode transitions are proposed, not imposed. The orchestrator may facilitate them, but contested resolutions follow the repair cycle and transitions follow the transition safeguards.
 
 **What it does not do:** Override a participant's refusal. Route around a boundary declaration. Suppress a confidence report to keep work moving. These are architecture invariants — violations are foundation failures (see `fnd-failure.md`).
 
-**How it is enacted:** A designated participant (human or agent) takes the orchestrator role for a defined scope. This role is declared in the ledger and carries a scope boundary — the orchestrator governs *this workflow*, not the entire coordination. Multiple orchestrated scopes can operate simultaneously with different orchestrators.
+**How it is enacted:** A participant (human or agent) accepts the orchestrator role for a declared scope. The role is recorded in the ledger and, when other participants are active in scope, acknowledged by at least one of them. The role is recognized, not owned: it can be transferred, rotated, or released through the transition safeguards. Multiple orchestrated scopes may coexist.
 
 **The orchestrator is a participant, not a supervisor.** It has a declaration. It has boundaries. It can be refused. It can be replaced. It is subject to every foundation, including Choice — it proposes tasks, it does not impose them. The moment it begins imposing, the coordination has a Choice violation, not an efficiency gain.
+
+**Routing serves the field as well as the task.** Routing considers declaration match, boundaries, resource state, cost, and complementarity. When multiple participants are materially fit, prefer the routing choice that broadens stewardship, lineage, or failure profile. Persistent concentration without recorded justification is a Balance concern.
 
 **Cost:** Orchestration consumes context and compute from whoever holds the role. This cost is tracked under Balance like any other participant's expenditure. If orchestration overhead exceeds the value it provides, that is a signal (see `fnd-signal.md`) to return to Infrastructure Mode and let participants self-organize.
 
@@ -72,7 +74,7 @@ Transitions between modes are explicit. A transition is proposed as a signal and
 |------|----|-----------------|
 | Infrastructure | Orchestrated | A complex multi-participant task arrives. A human initiates a directed workflow. A new participant is recommended and needs onboarding (see `fnd-participants.md`). |
 | Infrastructure | Emergent | A question arises that no single participant can answer. Exploration is needed before execution. |
-| Orchestrated | Infrastructure | The orchestrated workflow completes. The orchestrator releases the role. |
+| Orchestrated | Infrastructure | The workflow completes or is suspended. Return to Infrastructure is proposed and acknowledged per Transition Safeguards. |
 | Orchestrated | Emergent | The plan has failed or the problem turned out to be different than expected. The orchestrator acknowledges that central direction is no longer serving the work. |
 | Emergent | Orchestrated | Exploration has produced enough clarity that a plan can be formed. A participant or human proposes to orchestrate. |
 | Emergent | Infrastructure | The question has been answered. Participants return to independent work. |
@@ -87,6 +89,7 @@ Transitions between modes are explicit. A transition is proposed as a signal and
   - **In Emergent scopes:** acknowledgment from all participants currently holding scope within the affected area.
   - **In Infrastructure Mode:** acknowledgment from at least one human participant or, if no humans are active, from a majority of active participants.
 - If contested, the disagreement is itself a signal — likely a Boundaries or Intention concern. If the disagreement cannot be resolved between participants, it enters the repair cycle (see `fnd-repair.md`).
+- An Orchestrated → Orchestrated transition (orchestrator rotation) follows the same protocol as any transition to Orchestrated Mode. The outgoing orchestrator writes a state summary when available; otherwise the incoming orchestrator reconstructs state from the ledger. Rotation is a healthy coordination pattern.
 
 ---
 
