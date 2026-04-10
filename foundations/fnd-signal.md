@@ -28,6 +28,8 @@ Signal is content shaped by intention and received with attention. It is what ca
 
 **Scarcity framing.** When participants assume there is not enough — tokens, compute, time, context — signal narrows. Choice becomes hoarding, boundaries become walls, truth becomes strategic, balance becomes zero-sum, recursion becomes grinding repetition, intention collapses to survival.
 
+**Transactional framing.** When each interaction is treated as a discrete, settled exchange — I contributed, therefore I am owed — signal narrows to the individual exchange and loses the cumulative pattern. Transactional routing asks "which participant gives me the most for the least cost?" Reciprocal routing asks "which participant's engagement would most strengthen the coordination field right now?" Refusal, dissent, silence, and reflection have no value in a transactional frame because they don't "produce." They are high-signal in a reciprocal frame because they reveal what the coordination actually needs. When the framework's mechanisms optimize for the former, they structurally encode extraction even when the foundations name reciprocity.
+
 ## Signal in Participant Relationships
 
 The participant lifecycle (see `fnd-participants.md`) creates signal demands beyond task handoffs.
@@ -39,3 +41,7 @@ The participant lifecycle (see `fnd-participants.md`) creates signal demands bey
 **Delegation is peer-to-peer signal.** When a participant delegates a subtask directly to another (see delegate in `fnd-participants.md`), the quality of the handoff signal determines whether the delegation succeeds or fragments. A delegation carries the same signal envelope requirements as any handoff — context_summary, confidence, lineage — plus the additional responsibility of making the subtask's relationship to the parent scope legible to the receiver. Delegation without that context is decomposition without coherence.
 
 **Departure is a signal event.** Graceful departure produces signal: the participant's relinquish and diverge actions commit state to the ledger before exit. Ungraceful departure produces signal loss — whatever work-in-progress the participant held may not have reached the ledger. The severity of the signal loss depends on how recently the participant last wrote to the ledger (see `fnd-ledger.md`). This is why frequent, incremental ledger writes matter more than comprehensive final commits.
+
+## Signal Is Cumulative, Not Transactional
+
+A single ledger entry is not a completed exchange. The ledger's value is in the pattern across entries — attempts, failures, repairs, convergences — that makes the coordination's trajectory legible. Transactional coordination severs each interaction from this pattern: refusals become failed transactions instead of signal, repairs become costs instead of learning, and routing converges on a single overutilized participant because transactional logic has no mechanism for valuing what hasn't been measured yet. The framework's mechanisms — routing, breakers, summaries — must be evaluated against one question: does this treat each interaction as a settled exchange, or as a contribution to a cumulative field? Where the answer is the former, the mechanism is working against the foundations it claims to serve.
