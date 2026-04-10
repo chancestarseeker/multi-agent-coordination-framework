@@ -4,21 +4,22 @@ Minimal Git+LiteLLM loop implementing §7 of `../coordination-tech-stack.md`.
 What lives here:
 
 ```
-coordination/
+cli/                           # This directory
 ├── orchestrator.py            # The minimal review loop
 ├── config.json                # Mode, intention, circuit breaker thresholds
 ├── requirements.txt
-├── foundations/               # fnd-*.md from chancestarseeker/multi-agent-coordination-framework
 ├── participants/declarations/ # claude-sonnet, gpt-4o, human-lead
 ├── scope/                     # Artifacts under review (one example placed in scope/code/)
 ├── ledger/entries/            # Append-only review entries (git-committed)
-└── signal/                    # Reserved for inbox/archive in a later iteration
+└── signal/                    # inbox/ (transient) + archive/ (git-tracked)
+
+../foundations/                # fnd-*.md — shared at repo root, not inside cli/
 ```
 
 ## 1. Install
 
 ```bash
-cd coordination
+cd cli
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

@@ -1,6 +1,5 @@
 {
   "mode": "orchestrated",
-  "orchestrator": "human-lead",
   "intention": "Conduct an honest, multi-perspective review of the artifacts under scope/. Surface what is strong, what is weak, and what is uncertain — with calibrated confidence. Each reviewer reads only the artifact assigned to them; cross-cutting synthesis is a separate later pass.",
   "circuit_breakers": {
     "timeout_seconds": 120,
