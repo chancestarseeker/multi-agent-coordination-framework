@@ -219,10 +219,10 @@ def write_role_offer(
             f"proposes the role — the participant must accept or refuse. Until "
             f"accepted, no one holds the orchestrator role for this scope.\n\n"
             f"To accept:\n"
-            f"    python orchestrator.py accept-role --scope {scope_rel} "
+            f"    orchestrator accept-role --scope {scope_rel} "
             f"--as {offered_to['identifier']}\n\n"
             f"To refuse:\n"
-            f"    python orchestrator.py refuse-role --scope {scope_rel} "
+            f"    orchestrator refuse-role --scope {scope_rel} "
             f"--as {offered_to['identifier']} --reason '...'"
         ),
         confidence=1.0,
@@ -525,9 +525,9 @@ def cmd_offer_role(scope_rel: str, to_participant: str | None = None) -> int:
             f"orchestrator role on [bold]{scope_rel}[/].\n\n"
             f"Recorded as decision entry [bold]{offer.entry_id}[/].\n\n"
             f"The participant must accept or refuse:\n"
-            f"  [cyan]python orchestrator.py accept-role --scope {scope_rel} "
+            f"  [cyan]orchestrator accept-role --scope {scope_rel} "
             f"--as {candidate['identifier']}[/]\n"
-            f"  [cyan]python orchestrator.py refuse-role --scope {scope_rel} "
+            f"  [cyan]orchestrator refuse-role --scope {scope_rel} "
             f"--as {candidate['identifier']} --reason '...'[/]",
             title=f"offer-role: {offer.entry_id}",
             border_style="cyan",
@@ -562,7 +562,7 @@ def cmd_accept_role(scope_rel: str, participant_id: str) -> int:
             Panel(
                 f"[bold red]No pending offer for {scope_rel}.[/]\n\n"
                 f"The role must be offered before it can be accepted. Run:\n"
-                f"  [cyan]python orchestrator.py offer-role --scope {scope_rel}[/]",
+                f"  [cyan]orchestrator offer-role --scope {scope_rel}[/]",
                 title="no offer to accept",
                 border_style="red",
             )
@@ -632,8 +632,65 @@ def cmd_refuse_role(scope_rel: str, participant_id: str, reason: str) -> int:
             f"Reason: {reason}\n\n"
             f"Recorded as decision entry [bold]{entry.entry_id}[/].\n\n"
             f"The field should re-offer to the next candidate:\n"
-            f"  [cyan]python orchestrator.py offer-role --scope {scope_rel}[/]",
+            f"  [cyan]orchestrator offer-role --scope {scope_rel}[/]",
             title=f"refuse-role: {entry.entry_id}",
+            border_style="yellow",
+        )
+    )
+    return 0
+
+
+def cmd_withdraw_offer(scope_rel: str, reason: str) -> int:
+    """withdraw-offer: unstick a pending offer that will never be accepted.
+
+    This resolves the dead-state risk identified by deepseek-r1: if an
+    offered participant crashes or goes offline and never responds, the
+    scope is stuck until the offer expires. This command provides an
+    explicit escape hatch.
+    """
+    pending_offer, offered_to = pending_offer_for_scope(scope_rel)
+    if pending_offer is None:
+        console.print(f"[yellow]No pending offer on {scope_rel} to withdraw.[/]")
+        return 0
+
+    from cli.config import get_repo
+    repo = get_repo()
+
+    # Write a refuse entry on behalf of the coordination (not the participant)
+    entry = LedgerEntry(
+        entry_id=next_entry_id(),
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        author="field",
+        type="decision",
+        scope=scope_rel,
+        prior_entries=[pending_offer.entry_id],
+        summary=(
+            f"Offer {pending_offer.entry_id} to `{offered_to or '?'}` withdrawn. "
+            f"Reason: {reason}"
+        ),
+        detail=(
+            f"# Offer withdrawn\n\n"
+            f"**Original offer:** {pending_offer.entry_id}\n\n"
+            f"**Offered to:** `{offered_to or '?'}`\n\n"
+            f"**Reason for withdrawal:** {reason}\n\n"
+            f"The offered participant did not accept or refuse within the "
+            f"expected timeframe. This withdrawal unsticks the scope so a "
+            f"new offer can be made."
+        ),
+        confidence=1.0,
+        foundation_tag=["choice", "boundaries"],
+        role_action="refuse_orchestrator",
+    )
+    write_entry(entry, repo)
+    console.print(
+        Panel(
+            f"[bold yellow]Offer withdrawn.[/]\n\n"
+            f"Offer {pending_offer.entry_id} to `{offered_to or '?'}` on "
+            f"[bold]{scope_rel}[/] has been withdrawn.\n\n"
+            f"Reason: {reason}\n\n"
+            f"The scope is now free for a new offer:\n"
+            f"  [cyan]orchestrator offer-role --scope {scope_rel}[/]",
+            title=f"withdraw-offer: {entry.entry_id}",
             border_style="yellow",
         )
     )
@@ -692,7 +749,7 @@ def cmd_stepdown(
             f"Reason: {reason}\n\n"
             f"Recorded as decision entry [bold]{entry.entry_id}[/].\n\n"
             f"The field should now offer the role to the next candidate:\n"
-            f"  [cyan]python orchestrator.py offer-role --scope {scope_rel}[/]",
+            f"  [cyan]orchestrator offer-role --scope {scope_rel}[/]",
             title=f"stepdown: {entry.entry_id}",
             border_style="yellow",
         )

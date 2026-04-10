@@ -19,11 +19,14 @@ cli/                           # This directory
 ## 1. Install
 
 ```bash
-cd cli
+cd multi-agent-coordination-framework   # repo root
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .                        # installs the 'orchestrator' command
 ```
+
+This installs the `orchestrator` console command. All examples below use
+this command. Requires Python 3.10+.
 
 ## 2. Provide API keys
 
@@ -42,7 +45,7 @@ calls every active agent it finds.
 ## 3. Run a review
 
 ```bash
-python orchestrator.py review --scope scope/code/example_auth.py
+orchestrator review --scope scope/code/example_auth.py
 ```
 
 Each active agent receives:
@@ -59,7 +62,7 @@ entry.
 ## 4. Read the ledger
 
 ```bash
-python orchestrator.py ledger
+orchestrator ledger
 ```
 
 Or directly: `ls ledger/entries/`, `git log --oneline`.
@@ -67,8 +70,8 @@ Or directly: `ls ledger/entries/`, `git log --oneline`.
 For long sessions, use the **compressed view** instead:
 
 ```bash
-python orchestrator.py ledger --summary
-python orchestrator.py ledger --summary --scope scope/code/example_auth.py
+orchestrator ledger --summary
+orchestrator ledger --summary --scope scope/code/example_auth.py
 ```
 
 The summary follows `fnd-ledger.md` → Read Protocol → Ledger Summary:
@@ -135,7 +138,7 @@ breaker fires:
 ## Running the repair cycle
 
 ```bash
-python orchestrator.py repair --failure-entry 004 --arbiter claude-sonnet
+orchestrator repair --failure-entry 004 --arbiter claude-sonnet
 ```
 
 The arbiter can be any participant in `participants/declarations/`. The
@@ -228,17 +231,17 @@ rotation — not through unilateral `take`/`release` commands.
 
 ```bash
 # The field offers the role to the best candidate
-python orchestrator.py offer-role --scope scope/code/example_auth.py
+orchestrator offer-role --scope scope/code/example_auth.py
 
 # The offered participant accepts
-python orchestrator.py accept-role --scope scope/code/example_auth.py --as human-lead
+orchestrator accept-role --scope scope/code/example_auth.py --as human-lead
 
 # Now `review` and `repair` on this scope work
-python orchestrator.py review --scope scope/code/example_auth.py
+orchestrator review --scope scope/code/example_auth.py
 
 # Departure is field-triggered (rotation threshold, breaker, mode transition)
 # or voluntary via stepdown (framed as boundary_change, not "release"):
-python orchestrator.py stepdown --scope scope/code/example_auth.py --as human-lead --reason "..."
+orchestrator stepdown --scope scope/code/example_auth.py --as human-lead --reason "..."
 ```
 
 **Role_action values:** `offer_orchestrator`, `accept_orchestrator`,
@@ -268,19 +271,19 @@ only — schema validation, signal envelope dispatch, ledger reads, breaker
 monitoring:
 
 ```bash
-python orchestrator.py inbox process    # always works
-python orchestrator.py inbox list       # always works
-python orchestrator.py ledger           # always works
-python orchestrator.py offer-role ...   # always works (it's how the field proposes a holder)
+orchestrator inbox process    # always works
+orchestrator inbox list       # always works
+orchestrator ledger           # always works
+orchestrator offer-role ...   # always works (it's how the field proposes a holder)
 ```
 
 **What the script will NOT do without a role-holder:** anything that
 requires routing decisions or task assignment:
 
 ```bash
-python orchestrator.py review --scope X    # refuses with status 2
-python orchestrator.py repair ...          # refuses with status 2
-python orchestrator.py synthesize --scope X # refuses with status 2
+orchestrator review --scope X    # refuses with status 2
+orchestrator repair ...          # refuses with status 2
+orchestrator synthesize --scope X # refuses with status 2
 ```
 
 **Why entries are no longer authored by `"orchestrator"`.** The literal
@@ -322,7 +325,7 @@ The `self-select` command is how a participant declares they're picking
 up scope:
 
 ```bash
-python orchestrator.py self-select --scope scope/code/foo.py --as claude-sonnet --reason "noticed in Emergent Mode"
+orchestrator self-select --scope scope/code/foo.py --as claude-sonnet --reason "noticed in Emergent Mode"
 ```
 
 This writes an `attempt` ledger entry (per `fnd-participants.md → Accept`:
@@ -343,15 +346,15 @@ Per `fnd-participants.md → Transfer`, transfer is a three-step flow:
 
 ```bash
 # Step 1: holder steps down with a state snapshot
-python orchestrator.py stepdown --scope X --as alice \
+orchestrator stepdown --scope X --as alice \
   --reason "transferring — different focus needed" \
   --snapshot @path/to/snapshot.md
 
 # Step 2: field offers the role to the recipient
-python orchestrator.py offer-role --scope X --to bob
+orchestrator offer-role --scope X --to bob
 
 # Step 3: recipient accepts
-python orchestrator.py accept-role --scope X --as bob
+orchestrator accept-role --scope X --as bob
 ```
 
 The `--snapshot` value on `stepdown` can be a literal string or
@@ -483,10 +486,10 @@ cat > signal/inbox/sig-test.json <<'EOF'
 }
 EOF
 
-python orchestrator.py inbox list      # shows the pending signal
-python orchestrator.py inbox process   # dispatches via handle_query
-python orchestrator.py inbox list      # shows it in archive
-python orchestrator.py ledger          # shows the new decision entry
+orchestrator inbox list      # shows the pending signal
+orchestrator inbox process   # dispatches via handle_query
+orchestrator inbox list      # shows it in archive
+orchestrator ledger          # shows the new decision entry
 ```
 
 The test above is exactly how this feature was validated.
@@ -550,7 +553,7 @@ SELF-SELECTS — they may propose a synthesis decision OR refuse with reason.
 The aggregate of those proposals IS the synthesis.
 
 ```bash
-python orchestrator.py synthesize --scope scope/code/example_auth.py
+orchestrator synthesize --scope scope/code/example_auth.py
 ```
 
 There is no `--synthesizer` flag. There is no synthesizer role. The
@@ -614,8 +617,8 @@ Reviews are no longer broadcast to every active agent. The orchestrator
 now routes based on each participant's `preferred_tasks` declaration field.
 
 ```bash
-python orchestrator.py review --scope scope/code/example_auth.py
-python orchestrator.py review --scope scope/code/example_auth.py --task-type code_review
+orchestrator review --scope scope/code/example_auth.py
+orchestrator review --scope scope/code/example_auth.py --task-type code_review
 ```
 
 **How routing works:**
@@ -644,7 +647,7 @@ runs after `run_review` completes, alongside the Conflict breaker.
 **Timeout breaker** — fires when a signal in `signal/archive/` has gone
 unacknowledged past the destination participant's declared
 `context_constraints.latency_tolerance_seconds`. The check runs at the
-end of `python orchestrator.py inbox process`. An unacknowledged signal
+end of `orchestrator inbox process`. An unacknowledged signal
 past tolerance may indicate ungraceful departure.
 
 Both breakers write `failure` entries and surface loudly, consistent with
@@ -656,7 +659,7 @@ After a repair entry is written, the original failing reviewers can be
 automatically re-run under the resolved conditions:
 
 ```bash
-python orchestrator.py repair --failure-entry 004 --arbiter claude-sonnet --verify
+orchestrator repair --failure-entry 004 --arbiter claude-sonnet --verify
 ```
 
 The `--verify` flag triggers a limited re-review: each original reviewer
@@ -745,7 +748,7 @@ of falling through to the default:
 3. ✅ ~~Signal envelope inbox/archive~~ (step 4)
 4. ✅ ~~Orchestrator role as a thing held by participants~~ (step 5)
 5. ✅ ~~Hermes deployment, role transfer, self-select, Repetition breaker, handoff envelopes~~ (step 6)
-6. ✅ ~~Ledger summary generation~~ (step 7) — `python orchestrator.py ledger --summary`
+6. ✅ ~~Ledger summary generation~~ (step 7) — `orchestrator ledger --summary`
 7. ✅ ~~Capability-based routing~~ (step 8) — `review --task-type`, `route_participants()`, `infer_task_type()`
 8. ✅ ~~Resource + Timeout circuit breakers~~ (step 8) — session token tracking, resource breaker, timeout breaker via `inbox process`
 9. ✅ ~~Specialized handlers for state_update and acknowledgment signals~~ (step 8) — `handle_state_update()`, `handle_acknowledgment()`

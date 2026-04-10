@@ -259,7 +259,7 @@ def is_scope_safe_to_synthesize(entries: list[LedgerEntry]) -> tuple[bool, str]:
     if unresolved:
         return False, (
             f"unresolved failure entries on this scope: {sorted(unresolved)}. "
-            f"Run `python orchestrator.py repair --failure-entry <id>` first."
+            f"Run `orchestrator repair --failure-entry <id>` first."
         )
     return True, ""
 
@@ -402,8 +402,8 @@ def run_synthesis(scope_rel: str) -> int:
                 f"That transition is itself an orchestration decision — it "
                 f"requires a participant to be holding the role.\n\n"
                 f"Offer and accept the role first:\n"
-                f"  [cyan]python orchestrator.py offer-role --scope {scope_rel}[/]\n"
-                f"  [cyan]python orchestrator.py accept-role --scope {scope_rel} "
+                f"  [cyan]orchestrator offer-role --scope {scope_rel}[/]\n"
+                f"  [cyan]orchestrator accept-role --scope {scope_rel} "
                 f"--as <participant>[/]\n\n"
                 f"The role will be automatically rotated out as part of the "
                 f"transition, since Emergent Mode has no role-holder.",
@@ -446,7 +446,7 @@ def run_synthesis(scope_rel: str) -> int:
     if convergence is None:
         console.print(
             f"[red]error:[/] no convergence decision found for {scope_rel}. "
-            f"Run `python orchestrator.py review --scope {scope_rel}` first."
+            f"Run `orchestrator review --scope {scope_rel}` first."
         )
         return 2
 

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
 from git import Repo
 from pydantic import ValidationError
 from rich.panel import Panel
@@ -23,31 +23,37 @@ def ensure_signal_dirs() -> None:
     SIGNAL_ARCHIVE.mkdir(parents=True, exist_ok=True)
 
 
+_signal_lock = None
+
+
+def _get_signal_lock() -> FileLock:
+    global _signal_lock
+    if _signal_lock is None:
+        ensure_signal_dirs()
+        _signal_lock = FileLock(str(SIGNAL_ARCHIVE / ".lock"))
+    return _signal_lock
+
+
 def _next_signal_id() -> str:
-    """Monotonic signal id, scoped to inbox + archive, with file-lock."""
+    """Monotonic signal id, scoped to inbox + archive, with cross-platform lock."""
     ensure_signal_dirs()
-    lock_path = SIGNAL_ARCHIVE / ".lock"
-    with open(lock_path, "w") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            existing = sorted(
-                list(SIGNAL_INBOX.glob("*.json")) + list(SIGNAL_ARCHIVE.glob("*.json"))
-            )
-            if not existing:
-                return "sig-001"
-            nums: list[int] = []
-            for p in existing:
-                stem = p.stem
-                if stem.startswith("sig-"):
-                    try:
-                        nums.append(int(stem.split("-")[1]))
-                    except (ValueError, IndexError):
-                        continue
-            if not nums:
-                return "sig-001"
-            return f"sig-{max(nums) + 1:03d}"
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    with _get_signal_lock():
+        existing = sorted(
+            list(SIGNAL_INBOX.glob("*.json")) + list(SIGNAL_ARCHIVE.glob("*.json"))
+        )
+        if not existing:
+            return "sig-001"
+        nums: list[int] = []
+        for p in existing:
+            stem = p.stem
+            if stem.startswith("sig-"):
+                try:
+                    nums.append(int(stem.split("-")[1]))
+                except (ValueError, IndexError):
+                    continue
+        if not nums:
+            return "sig-001"
+        return f"sig-{max(nums) + 1:03d}"
 
 
 def write_signal_to_inbox(envelope: SignalEnvelope) -> Path:
@@ -354,7 +360,7 @@ def handle_error(envelope: SignalEnvelope, repo: Repo) -> LedgerEntry | None:
         # (avoids the stale next_entry_id() hint bug)
         entry = entry.model_copy(update={
             "detail": entry.detail + (
-                f"\n\nRun: `python orchestrator.py repair "
+                f"\n\nRun: `orchestrator repair "
                 f"--failure-entry {entry.entry_id}` to begin the repair cycle."
             )
         })

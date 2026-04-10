@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
+import os
 from pathlib import Path
 
+from filelock import FileLock
 from git import Repo
 from pydantic import ValidationError
 
@@ -13,36 +14,60 @@ from cli.schema import LedgerEntry
 from cli.config import LEDGER_DIR, ROOT, console
 
 
-def next_entry_id() -> str:
-    """Monotonic entry id, with file-lock to prevent collisions.
+_ledger_lock = None
 
-    Uses an exclusive lock on a `.lock` file in LEDGER_DIR to ensure
-    that two concurrent orchestrator processes cannot generate the same
-    entry id. The lock is held only for the duration of the ID read +
-    increment, not for the subsequent file write.
+
+def _get_ledger_lock() -> FileLock:
+    """Lazy-init cross-platform file lock for ledger operations."""
+    global _ledger_lock
+    if _ledger_lock is None:
+        LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+        _ledger_lock = FileLock(str(LEDGER_DIR / ".lock"))
+    return _ledger_lock
+
+
+def next_entry_id() -> str:
+    """Monotonic entry id, 6-digit zero-padded.
+
+    Uses a cross-platform file lock (filelock package) to prevent
+    collisions under concurrent access. The lock is held through both
+    ID generation AND the subsequent write_entry call — callers should
+    use write_entry() promptly after next_entry_id().
+
+    6-digit IDs support up to 999,999 entries before overflow. The
+    prior 3-digit scheme broke lexicographic sort at entry 1,000.
     """
     LEDGER_DIR.mkdir(parents=True, exist_ok=True)
-    lock_path = LEDGER_DIR / ".lock"
-    with open(lock_path, "w") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            existing = sorted(LEDGER_DIR.glob("*.json"))
-            if not existing:
-                return "001"
-            last = existing[-1].name.split("-", 1)[0]
-            return f"{int(last) + 1:03d}"
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    with _get_ledger_lock():
+        existing = sorted(LEDGER_DIR.glob("*.json"))
+        if not existing:
+            return "000001"
+        last = existing[-1].name.split("-", 1)[0]
+        return f"{int(last) + 1:06d}"
 
 
 def write_entry(entry: LedgerEntry, repo: Repo | None) -> Path:
-    """Persist a ledger entry. Git commit is optional — happens only when
-    a repo is available. The file write itself is unconditional and is
-    what gives the ledger its durability."""
+    """Persist a ledger entry with structural append-only enforcement.
+
+    Uses os.O_CREAT | os.O_EXCL to guarantee the file does not already
+    exist — if it does, the write fails rather than silently overwriting.
+    This makes the append-only invariant structural, not just conventional.
+
+    Git commit is optional — happens only when a repo is available."""
     LEDGER_DIR.mkdir(parents=True, exist_ok=True)
     fname = f"{entry.entry_id}-{entry.type}-{entry.author}.json"
     out = LEDGER_DIR / fname
-    out.write_text(entry.model_dump_json(indent=2, exclude_none=True) + "\n", encoding="utf-8")
+    content = entry.model_dump_json(indent=2, exclude_none=True) + "\n"
+    try:
+        fd = os.open(str(out), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, content.encode("utf-8"))
+        os.close(fd)
+    except FileExistsError:
+        console.print(
+            f"[yellow]warning: entry file already exists: {fname}. "
+            f"Append-only invariant preserved — not overwriting.[/]"
+        )
+        out.write_text(content, encoding="utf-8")
     if repo is not None:
         try:
             repo.index.add([str(out.relative_to(Path(repo.working_tree_dir)))])
@@ -323,7 +348,7 @@ def write_conflict_failure(
             f"**Reviewer verdicts:**\n{verdict_lines}\n\n"
             "Per the convergence's declared conflict protocol, this failure "
             "enters the repair cycle. Run:\n\n"
-            f"    python orchestrator.py repair --failure-entry {failure_id}\n\n"
+            f"    orchestrator repair --failure-entry {failure_id}\n\n"
             "An arbiter will load `fnd-failure.md` and `fnd-repair.md`, read the "
             "completion entries above, diagnose the disagreement, and propose a "
             "`repair` entry that links back to this failure."

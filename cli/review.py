@@ -182,7 +182,7 @@ def run_review(scope_rel: str, task_type: str | None = None) -> int:
                     f"requires repair first.\n\n"
                     f"Run repair on each:\n"
                     + "\n".join(
-                        f"  [cyan]python orchestrator.py repair --failure-entry {e.entry_id}[/]"
+                        f"  [cyan]orchestrator repair --failure-entry {e.entry_id}[/]"
                         for e in unresolved
                     ),
                     title="repetition breaker",
@@ -217,7 +217,7 @@ def run_review(scope_rel: str, task_type: str | None = None) -> int:
                 f"orchestrator.py is the tool the role-holder uses, not the "
                 f"orchestrator itself.\n\n"
                 f"Either:\n"
-                f"  1. [cyan]python orchestrator.py offer-role --scope {scope_rel}[/]\n"
+                f"  1. [cyan]orchestrator offer-role --scope {scope_rel}[/]\n"
                 f"     then [cyan]accept-role --scope {scope_rel} --as <participant>[/]\n"
                 f"     then re-run review\n"
                 f"  2. Surface the scope as an open question via "
@@ -362,7 +362,7 @@ def run_review(scope_rel: str, task_type: str | None = None) -> int:
                 f"Failure entry: [bold]{failure.entry_id}[/]\n\n"
                 f"Per the declared conflict protocol ([italic]{conflict_protocol}[/]),\n"
                 f"the coordination must enter the repair cycle (fnd-repair.md).\n\n"
-                f"Next: [bold cyan]python orchestrator.py repair --failure-entry {failure.entry_id} --arbiter <identifier>[/]",
+                f"Next: [bold cyan]orchestrator repair --failure-entry {failure.entry_id} --arbiter <identifier>[/]",
                 title="!!! repair cycle required !!!",
                 border_style="red",
             )
