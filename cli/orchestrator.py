@@ -10,7 +10,6 @@ What this orchestrator does NOT yet do (deliberately deferred):
   - signal envelope inbox/archive plumbing
   - circuit breaker enforcement (only confidence is checked, as a warning)
   - routing decisions (every active agent reviews the same scope)
-  - ledger summary generation between sessions
 
 Run:
     python orchestrator.py review --scope scope/code/example_auth.py
@@ -1580,7 +1579,19 @@ on the reviewers — it is a re-establishment of coherent shared truth.
 {signal_docs}
 """
 
-REPAIR_USER_TEMPLATE = """## Failure entry (the breaker that fired)
+REPAIR_USER_TEMPLATE = """## Ledger Summary (orienting context per fnd-ledger.md)
+
+The summary below is the compressed ledger view per fnd-ledger.md → Read
+Protocol → Ledger Summary. Failure, repair, intention_shift, and
+boundary_change entries are shown in full because they carry the highest
+signal density for diagnosing what went wrong. Other entries are compressed.
+Read this to orient before diagnosing the specific failure below.
+
+{ledger_summary}
+
+---
+
+## Failure entry (the breaker that fired)
 
 ```json
 {failure_json}
@@ -1691,6 +1702,7 @@ def run_repair(failure_entry_id: str, arbiter_id: str | None) -> int:
         signal_docs=SIGNAL_ENVELOPE_DOCS,
     )
     user = REPAIR_USER_TEMPLATE.format(
+        ledger_summary=summarize_ledger(active_scope=failure.scope),
         failure_json=failure.model_dump_json(indent=2, exclude_none=True),
         completion_blocks=completion_blocks,
     )
@@ -1838,7 +1850,21 @@ proposal made out of obligation.
 {signal_docs}
 """
 
-SELF_SELECT_SYNTHESIS_USER_TEMPLATE = """## Convergence decision (the review that opened this scope)
+SELF_SELECT_SYNTHESIS_USER_TEMPLATE = """## Ledger Summary (orienting context per fnd-ledger.md)
+
+The summary below is the compressed ledger view per fnd-ledger.md → Read
+Protocol → Ledger Summary. Failure, repair, intention_shift, and
+boundary_change entries are shown in full because they define current
+operating conditions and prior conflicts. Decision/attempt/completion
+entries on this synthesis scope are shown in summary form; entries on
+other scopes are compressed to one line. Read this to orient before
+forming your synthesis position below.
+
+{ledger_summary}
+
+---
+
+## Convergence decision (the review that opened this scope)
 
 ```json
 {convergence_json}
@@ -1956,6 +1982,135 @@ def entries_for_scope(scope_rel: str) -> list[LedgerEntry]:
         if entry.scope == scope_rel:
             out.append(entry)
     return out
+
+
+# Soft byte cap for the generated summary. Per fnd-ledger.md the threshold
+# is "the smallest context window of any active participant" — we don't
+# know that statically, so we pick a conservative default that fits in
+# every modern model's context with room to spare. Exceeding it is signal,
+# not failure: we still return the full summary, just print a warning.
+LEDGER_SUMMARY_SOFT_LIMIT_BYTES = 50_000
+
+# Entry types whose detail is preserved in full by `summarize_ledger`,
+# per fnd-ledger.md → Read Protocol → Ledger Summary:
+#   - failure / repair carry the highest signal density for preventing
+#     repeated mistakes
+#   - intention_shift / boundary_change define current operating conditions
+_PRESERVE_IN_FULL = {"failure", "repair", "intention_shift", "boundary_change"}
+
+
+def summarize_ledger(
+    active_scope: str | None = None,
+    soft_limit_bytes: int = LEDGER_SUMMARY_SOFT_LIMIT_BYTES,
+) -> str:
+    """Generate the compressed ledger view per fnd-ledger.md → Ledger Summary.
+
+    Compression rules mirror the foundation spec verbatim:
+
+      - `failure`, `repair`, `intention_shift`, and `boundary_change`
+        entries are preserved in full (summary AND detail). The spec
+        marks these as the highest-signal entries — failures and repairs
+        prevent recursive failure loops, intention_shift and
+        boundary_change define current operating conditions.
+
+      - `decision`, `attempt`, and `completion` entries whose `scope`
+        matches `active_scope` are included with their `summary` field
+        only (detail omitted).
+
+      - All other `decision` / `attempt` / `completion` entries are
+        compressed to a single line: id, author, type, scope, summary.
+
+      - If `active_scope` is None, every decision/attempt/completion gets
+        the one-line treatment. The full-preservation types are unaffected.
+
+    The output is markdown text suitable for terminal display AND for
+    embedding in LLM system or user prompts.
+
+    A Balance warning is printed to stderr (via `console`) if the resulting
+    text exceeds `soft_limit_bytes`. Per fnd-ledger.md: "If it is not
+    [small enough], the coordination has grown beyond what its current
+    participants can hold, and that itself is a signal (a Balance concern)."
+    The full summary is still returned — the warning is signal for the
+    human, not a refusal.
+    """
+    paths = sorted(LEDGER_DIR.glob("*.json"))
+    if not paths:
+        return "_(ledger is empty)_\n"
+
+    parts: list[str] = ["# Ledger Summary"]
+    if active_scope:
+        parts.append(f"_Active scope: `{active_scope}` "
+                     f"(decision/attempt/completion entries on this scope "
+                     f"are shown in summary form; others are compressed to one line.)_")
+    else:
+        parts.append("_No active scope specified — "
+                     "all decision/attempt/completion entries compressed to one line. "
+                     "Failure, repair, intention_shift, and boundary_change entries "
+                     "are preserved in full regardless of scope._")
+    parts.append("")
+
+    n_full = 0
+    n_active = 0
+    n_compressed = 0
+
+    for p in paths:
+        try:
+            entry = LedgerEntry(**json.loads(p.read_text(encoding="utf-8")))
+        except (ValidationError, json.JSONDecodeError):
+            continue
+
+        if entry.type in _PRESERVE_IN_FULL:
+            tags = ", ".join(entry.foundation_tag) if entry.foundation_tag else "—"
+            priors = ", ".join(entry.prior_entries) if entry.prior_entries else "—"
+            parts.append(
+                f"## {entry.entry_id} · `{entry.author}` · **{entry.type}** "
+                f"(conf {entry.confidence:.2f})"
+            )
+            parts.append(
+                f"_scope: `{entry.scope}` · tags: {tags} · prior: {priors}_"
+            )
+            parts.append("")
+            parts.append(f"**Summary:** {entry.summary}")
+            if entry.detail:
+                parts.append("")
+                parts.append("**Detail:**")
+                parts.append("")
+                parts.append(entry.detail)
+            parts.append("")
+            n_full += 1
+        elif active_scope is not None and entry.scope == active_scope:
+            verdict_str = f" · verdict={entry.verdict}" if entry.verdict else ""
+            parts.append(
+                f"- **{entry.entry_id}** · `{entry.author}` · {entry.type}"
+                f"{verdict_str} (conf {entry.confidence:.2f}) — {entry.summary}"
+            )
+            n_active += 1
+        else:
+            parts.append(
+                f"- {entry.entry_id} · `{entry.author}` · {entry.type} · "
+                f"`{entry.scope}` — {entry.summary}"
+            )
+            n_compressed += 1
+
+    parts.append("")
+    parts.append(
+        f"_Counts: {n_full} preserved in full · "
+        f"{n_active} on active scope · "
+        f"{n_compressed} compressed_"
+    )
+
+    text = "\n".join(parts) + "\n"
+
+    size = len(text.encode("utf-8"))
+    if size > soft_limit_bytes:
+        console.print(
+            f"[yellow]Balance warning:[/] ledger summary is {size:,} bytes "
+            f"(soft limit {soft_limit_bytes:,}). Per fnd-ledger.md, this is "
+            f"a signal that the coordination may have grown beyond what its "
+            f"current participants can hold."
+        )
+
+    return text
 
 
 def latest_convergence_for_scope(entries: list[LedgerEntry]) -> LedgerEntry | None:
@@ -2696,6 +2851,12 @@ def run_synthesis(scope_rel: str) -> int:
     lang = Path(scope_rel).suffix.lstrip(".") or "text"
     convergence_json = convergence.model_dump_json(indent=2, exclude_none=True)
 
+    # Compute the ledger summary once and share it across all invitees.
+    # The summary is the same for every participant in this synthesis pass,
+    # and computing it inside the loop would also fire the Balance warning
+    # once per invitee.
+    ledger_summary_text = summarize_ledger(active_scope=scope_rel)
+
     proposals: list[LedgerEntry] = []
     refusals: list[LedgerEntry] = []
     invitee_results: list[dict[str, Any]] = []
@@ -2717,6 +2878,7 @@ def run_synthesis(scope_rel: str) -> int:
             signal_docs=SIGNAL_ENVELOPE_DOCS,
         )
         user = SELF_SELECT_SYNTHESIS_USER_TEMPLATE.format(
+            ledger_summary=ledger_summary_text,
             convergence_json=convergence_json,
             completion_blocks=completion_blocks,
             repair_blocks=repair_blocks,
@@ -3024,7 +3186,25 @@ def main() -> int:
         help="Optional: why this participant is picking up this scope",
     )
 
-    sub.add_parser("ledger", help="Print all ledger entries in chronological order")
+    p_ledger = sub.add_parser(
+        "ledger",
+        help="Print ledger entries (full panels by default; --summary for the compressed view)",
+    )
+    p_ledger.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print the compressed ledger view per fnd-ledger.md → Ledger Summary "
+             "instead of one panel per entry. Failure/repair/intention_shift/"
+             "boundary_change entries are preserved in full; other types are "
+             "compressed unless their scope matches --scope.",
+    )
+    p_ledger.add_argument(
+        "--scope",
+        default=None,
+        help="(--summary only) Treat this scope as active: decision/attempt/"
+             "completion entries on it are shown in summary form rather than "
+             "compressed to one line.",
+    )
 
     p_inbox = sub.add_parser(
         "inbox",
@@ -3053,6 +3233,8 @@ def main() -> int:
     if args.cmd == "self-select":
         return cmd_self_select(args.scope, args.as_participant, args.reason)
     if args.cmd == "ledger":
+        if args.summary:
+            return print_ledger_summary(args.scope)
         return print_ledger()
     if args.cmd == "inbox":
         if args.action == "list":
@@ -3158,6 +3340,19 @@ def print_ledger() -> int:
                 title=f"entry {data['entry_id']}",
             )
         )
+    return 0
+
+
+def print_ledger_summary(active_scope: str | None) -> int:
+    """Render the compressed ledger view (per fnd-ledger.md → Ledger Summary).
+
+    The summary text itself is generated by `summarize_ledger`; this wrapper
+    just prints it. We bypass `console.print`'s rich-markup parsing because
+    the summary contains backticks and brackets that Rich would otherwise
+    interpret as styling tokens.
+    """
+    text = summarize_ledger(active_scope=active_scope)
+    print(text)
     return 0
 
 

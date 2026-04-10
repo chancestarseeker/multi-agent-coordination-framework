@@ -63,6 +63,46 @@ python orchestrator.py ledger
 
 Or directly: `ls ledger/entries/`, `git log --oneline`.
 
+For long sessions, use the **compressed view** instead:
+
+```bash
+python orchestrator.py ledger --summary
+python orchestrator.py ledger --summary --scope scope/code/example_auth.py
+```
+
+The summary follows `fnd-ledger.md` → Read Protocol → Ledger Summary:
+
+- `failure`, `repair`, `intention_shift`, and `boundary_change` entries are
+  preserved **in full** (summary + detail). These are the highest-signal
+  entries — they prevent repeated failures and define current operating
+  conditions; lossy compression here would defeat the summary's purpose.
+- `decision`, `attempt`, and `completion` entries on `--scope` (the
+  "currently active" scope) are shown with their `summary` field only,
+  detail omitted.
+- Same types on other scopes are compressed to one line per entry.
+- If `--scope` is not given, every decision/attempt/completion gets the
+  one-line treatment.
+
+If the resulting summary exceeds a soft threshold (~50 KB) the orchestrator
+prints a **Balance warning** to the console, per `fnd-ledger.md`:
+
+> The summary should be small enough to fit within the smallest context
+> window of any active participant. If it is not, the coordination has
+> grown beyond what its current participants can hold, and that itself
+> is a signal (a Balance concern).
+
+The summary is still returned in full when this fires — the warning is
+signal for the human, not a refusal.
+
+**Where the summary is wired into LLM context.** `run_repair` and
+`run_synthesis` both inject the compressed summary as a `## Ledger Summary`
+block at the top of the user message, with the active scope set to the
+failure/synthesis scope. Invited participants receive the orienting context
+the foundation says they should get on session resumption. `run_review` is
+intentionally NOT wired — reviewers are scoped to a single artifact and
+don't currently load history; injecting a summary there would be a separate
+behavior change for reviewers worth discussing on its own.
+
 ## Convergence and the Conflict breaker (step 2)
 
 When more than one agent reviews the same scope, the orchestrator treats
@@ -583,7 +623,6 @@ Orchestrated, synthesis transitions to Emergent).
 
 | Feature | Notes |
 |---|---|
-| Ledger summary generation | `fnd-ledger.md` describes summarization — not implemented. Re-runs will eventually blow up context. **This is the most pragmatic remaining gap.** |
 | Capability-based routing within a single scope | All active agents review the same scope. The role-holder doesn't yet route different sub-tasks to different agents based on `preferred_tasks`. |
 | Resource and Timeout circuit breakers | Confidence and Repetition fire; Conflict fires via verdict mismatch. Resource (token usage > 2× per-participant average) and Timeout (signal unack'd within latency tolerance) are not yet wired. |
 | Verification rerun | The repair cycle records the resolution but does not automatically re-execute the failed review under the resolved conditions. |
@@ -599,7 +638,7 @@ Orchestrated, synthesis transitions to Emergent).
 3. ✅ ~~Signal envelope inbox/archive~~ (step 4)
 4. ✅ ~~Orchestrator role as a thing held by participants~~ (step 5)
 5. ✅ ~~Hermes deployment, role transfer, self-select, Repetition breaker, handoff envelopes~~ (step 6)
-6. **Ledger summary generation** — the most pragmatic remaining gap. `fnd-ledger.md` specifies it; we just need to translate. Re-runs in long sessions will eventually blow context without it.
+6. ✅ ~~Ledger summary generation~~ (step 7) — `python orchestrator.py ledger --summary`, wired into `run_repair` and `run_synthesis` user prompts so invited participants receive the compressed view per `fnd-ledger.md` → Read Protocol → Ledger Summary.
 7. Capability-based routing within a single scope (`preferred_tasks` from declarations)
 8. Resource + Timeout circuit breakers
 9. Specialized handlers for state_update and acknowledgment signals
