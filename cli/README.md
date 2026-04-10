@@ -221,41 +221,57 @@ This is exactly what `fnd-field.md` says:
 > The orchestrator is a participant, not a supervisor. It has a
 > declaration. It has boundaries. It can be refused. It can be replaced.
 
-**Taking and releasing the role.** The role is recorded as a `decision`
-ledger entry with a `role_action` field set to `take_orchestrator` or
-`release_orchestrator`. The author of these entries is the participant
-taking the action.
+**The role is offered by the field and accepted by a participant, not taken.**
+Per fnd-field.md: "The role is recognized, not owned." Role lifecycle is
+managed through `offer-role`, `accept-role`, `refuse-role`, and field-triggered
+rotation — not through unilateral `take`/`release` commands.
 
 ```bash
-# A participant declares they're taking the role for a scope
-python orchestrator.py take-role --scope scope/code/example_auth.py --as human-lead
+# The field offers the role to the best candidate
+python orchestrator.py offer-role --scope scope/code/example_auth.py
 
-# Now `review` and `repair` on this scope work — they route on behalf of human-lead
+# The offered participant accepts
+python orchestrator.py accept-role --scope scope/code/example_auth.py --as human-lead
+
+# Now `review` and `repair` on this scope work
 python orchestrator.py review --scope scope/code/example_auth.py
 
-# When done, the participant releases
-python orchestrator.py release-role --scope scope/code/example_auth.py --as human-lead
+# Departure is field-triggered (rotation threshold, breaker, mode transition)
+# or voluntary via stepdown (framed as boundary_change, not "release"):
+python orchestrator.py stepdown --scope scope/code/example_auth.py --as human-lead --reason "..."
 ```
+
+**Role_action values:** `offer_orchestrator`, `accept_orchestrator`,
+`refuse_orchestrator`, `rotate_orchestrator`, `stepdown_orchestrator`.
 
 **The state machine:**
 
 | Action | Refused if |
 |---|---|
-| `take-role --as X` | Someone already holds the role for this scope, OR `X` is not in `participants/declarations/` |
-| `release-role --as X` | `X` does not currently hold the role (you cannot release what you do not hold — that would be writing on behalf of another participant) |
+| `offer-role` | Someone already holds the role, OR a pending offer exists |
+| `accept-role --as X` | No pending offer, OR the offer was made to a different participant |
+| `refuse-role --as X` | No pending offer to refuse |
+| `stepdown --as X` | `X` does not currently hold the role |
 | `review` / `repair` | No one holds the orchestrator role for the scope |
-| `synthesize` | No one holds the role to *initiate* the transition (the role is auto-released as part of the transition itself, since Emergent Mode is roleless) |
+| `synthesize` | No one holds the role (it is auto-rotated as part of the transition) |
+
+**Rotation triggers** (configured in `config.json` under `role_rotation`):
+- `max_entries_per_holder`: rotate after N entries authored by the holder
+- `max_seconds_per_holder`: rotate after T seconds of holding
+- Repetition breaker fires on the scope
+- Resource ceiling approached
+- Mode transition (orchestrated -> emergent/infrastructure)
+- Voluntary stepdown (the holder recognizes they can no longer serve)
 
 **What the script does without a role-holder:** Infrastructure Mode work
 only — schema validation, signal envelope dispatch, ledger reads, breaker
-monitoring. These are always available because they're automated services
-that don't make orchestration decisions:
+monitoring:
 
 ```bash
 python orchestrator.py inbox process    # always works
 python orchestrator.py inbox list       # always works
 python orchestrator.py ledger           # always works
-python orchestrator.py take-role ...    # always works (it's how you create a role-holder)
+python orchestrator.py offer-role ...   # always works (it's how the field proposes a holder)
 ```
 
 **What the script will NOT do without a role-holder:** anything that
@@ -285,13 +301,13 @@ an identity nobody held. After this change:
   Ledger entries written during emergent self-selection are authored by
   the self-selecting participant.
 
-**The synthesize flow auto-releases the role.** Opening synthesis transitions
+**The synthesize flow auto-rotates the role.** Opening synthesis transitions
 the scope from Orchestrated to Emergent. Emergent Mode has no role-holder,
-so the role-holder's last act is releasing the role. After `synthesize`
-completes, you'll see three orchestrator-role-related entries on the scope:
-the original `take_orchestrator`, the mode transition decision, and the
-auto-`release_orchestrator`. To run another `review` on the same scope after
-synthesis, you'd need to take the role again.
+so the field rotates the role out as part of the transition. After
+`synthesize` completes, you'll see the original `accept_orchestrator`,
+the mode transition decision, and the field-triggered `rotate_orchestrator`.
+To run another `review` on the same scope after synthesis, offer and accept
+the role again.
 
 ## Self-selection in Emergent Mode
 
@@ -321,55 +337,27 @@ self-selection is wrong: routing happens through the role-holder, not
 around them. The error message tells the would-be self-selector to ask
 the role-holder for routing or to wait for them to release.
 
-## Role transfer with state snapshot
+## Role transfer
 
-Per `fnd-participants.md → Transfer`:
-
-> 1. The outgoing participant writes a state snapshot to the ledger —
->    what was done, what remains, what was learned.
-> 2. The incoming participant acknowledges receipt before assuming
->    ownership.
-> 3. Both the release and the acknowledgment are recorded as ledger
->    entries.
-
-Transfer is a two-command flow using existing `release-role` and
-`take-role` with new options:
+Per `fnd-participants.md → Transfer`, transfer is a three-step flow:
 
 ```bash
-# Step 1: outgoing participant releases with a snapshot, naming the recipient
-python orchestrator.py release-role --scope X --as alice \
-  --reason "transferring to bob — different focus needed" \
-  --snapshot @path/to/snapshot.md \
-  --to bob
+# Step 1: holder steps down with a state snapshot
+python orchestrator.py stepdown --scope X --as alice \
+  --reason "transferring — different focus needed" \
+  --snapshot @path/to/snapshot.md
 
-# Step 2: recipient takes the role, acknowledging the release
-python orchestrator.py take-role --scope X --as bob --acknowledging <release-entry-id>
+# Step 2: field offers the role to the recipient
+python orchestrator.py offer-role --scope X --to bob
+
+# Step 3: recipient accepts
+python orchestrator.py accept-role --scope X --as bob
 ```
 
-The `--snapshot` value can be either a literal string or `@path/to/file.md`
-to read from disk. It becomes a `## State Snapshot` section in the release
-entry's detail field. The `--to` flag records the intended recipient in the
-release entry's summary and detail.
-
-The `--acknowledging` flag on `take-role` validates that the named entry
-is a `release_orchestrator` entry on the same scope, then writes a take
-entry with the release entry id in `prior_entries` and a `## Acknowledging
-Transfer` section in the detail. The lineage chain is now traversable in
-both directions.
-
-**Between release and take, the role is unheld.** That's framework-honest:
-the outgoing participant has explicitly stepped down before the new holder
-has stepped up. Routing operations on the scope are refused during this
-window. If the recipient never acknowledges, the release stands and the
-scope stays in transition until someone else takes the role (acknowledging
-the release or not).
-
-**Why two commands instead of one `transfer-role`.** The framework's
-"transfer requires acknowledgment from the receiving participant" maps
-naturally to two commands run by two participants. A single `transfer-role`
-command would either have to write the take on behalf of the recipient
-(which is exactly the on-behalf-of-another-participant pattern the
-framework forbids) or be sugar for the two-command sequence anyway.
+The `--snapshot` value on `stepdown` can be a literal string or
+`@path/to/file.md` to read from disk. Between stepdown and acceptance,
+the role is unheld — routing operations on the scope are refused. This
+is framework-honest: no one holds the role during the transition.
 
 ## The Repetition circuit breaker
 
@@ -694,8 +682,9 @@ Emergent back to Infrastructure mode. This entry:
   distribution, and the proposal/refusal/failure counts
 - Links back to the original mode-transition entry via `prior_entries`
 
-After mode return, the scope is at rest. A participant must `take-role`
-again to begin new orchestrated work on the same scope.
+After mode return, the scope is at rest. The role must be offered and
+accepted again (`offer-role` + `accept-role`) to begin new orchestrated
+work on the same scope.
 
 ## Signal lineage validation
 

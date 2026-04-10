@@ -18,14 +18,14 @@ from cli.ledger import next_entry_id, write_entry
 from cli.parsing import extract_all_json, classify_json_object, finalize_entry
 
 
-def _ensure_signal_dirs() -> None:
+def ensure_signal_dirs() -> None:
     SIGNAL_INBOX.mkdir(parents=True, exist_ok=True)
     SIGNAL_ARCHIVE.mkdir(parents=True, exist_ok=True)
 
 
 def _next_signal_id() -> str:
     """Monotonic signal id, scoped to inbox + archive, with file-lock."""
-    _ensure_signal_dirs()
+    ensure_signal_dirs()
     lock_path = SIGNAL_ARCHIVE / ".lock"
     with open(lock_path, "w") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
@@ -52,7 +52,7 @@ def _next_signal_id() -> str:
 
 def write_signal_to_inbox(envelope: SignalEnvelope) -> Path:
     """Persist a signal envelope as pending in signal/inbox/."""
-    _ensure_signal_dirs()
+    ensure_signal_dirs()
     if envelope.signal_id == "AUTO":
         envelope = envelope.model_copy(update={"signal_id": _next_signal_id()})
     path = SIGNAL_INBOX / f"{envelope.signal_id}.json"
@@ -88,7 +88,7 @@ def write_outgoing_handoff(
     the handoff fully auditable. This is off by default because it
     substantially increases archive file sizes.
     """
-    _ensure_signal_dirs()
+    ensure_signal_dirs()
     full_payload: dict[str, Any] = {
         "task_type": task_type,
         "scope": scope_path,
@@ -124,7 +124,7 @@ def write_outgoing_handoff(
 
 def archive_signal(envelope: SignalEnvelope, repo: Repo | None) -> Path:
     """Move a processed signal from inbox to archive (and git-track the archive copy)."""
-    _ensure_signal_dirs()
+    ensure_signal_dirs()
     inbox_path = SIGNAL_INBOX / f"{envelope.signal_id}.json"
     archive_path = SIGNAL_ARCHIVE / f"{envelope.signal_id}.json"
     archive_path.write_text(envelope.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -344,14 +344,20 @@ def handle_error(envelope: SignalEnvelope, repo: Repo) -> LedgerEntry | None:
                 f"**Reporter confidence:** {envelope.confidence:.2f}\n\n"
                 f"**Lineage:** {envelope.lineage}\n\n"
                 f"Per fnd-failure.md, this is recorded as a failure entry. The "
-                f"coordination should consider entering the repair cycle — run "
-                f"`python orchestrator.py repair --failure-entry {next_entry_id()}` "
-                f"once the concern is diagnosed."
+                f"coordination should consider entering the repair cycle."
             ),
             foundation_tag=list(cited_foundations),
             scope=payload.get("scope", "coordination"),
         )
         write_entry(entry, repo)
+        # Update the detail with the actual entry_id now that it's assigned
+        # (avoids the stale next_entry_id() hint bug)
+        entry = entry.model_copy(update={
+            "detail": entry.detail + (
+                f"\n\nRun: `python orchestrator.py repair "
+                f"--failure-entry {entry.entry_id}` to begin the repair cycle."
+            )
+        })
         console.print(
             Panel(
                 f"[bold red]Foundation concern[/] from `{envelope.origin}` "
@@ -623,7 +629,7 @@ def validate_signal_lineage(envelope: SignalEnvelope) -> list[str]:
     processed, but the warning alerts the human that the lineage chain has
     a gap.
     """
-    _ensure_signal_dirs()
+    ensure_signal_dirs()
     missing: list[str] = []
     for sid in envelope.lineage:
         archive_path = SIGNAL_ARCHIVE / f"{sid}.json"

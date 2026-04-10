@@ -13,6 +13,10 @@
     "track_cost_per_participant": true,
     "surface_imbalance_at_multiplier": 1.5
   },
+  "role_rotation": {
+    "max_entries_per_holder": 20,
+    "max_seconds_per_holder": 3600
+  },
   "convergence": {
     "default_protocol": "escalate_to_repair",
     "arbiter": "human-lead"

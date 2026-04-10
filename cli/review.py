@@ -32,6 +32,7 @@ from cli.breakers import (
     write_repetition_failure,
     check_resource_breaker,
     check_resource_ceiling,
+    write_confidence_failure,
 )
 from cli.roles import current_orchestrator_for_scope
 
@@ -216,9 +217,10 @@ def run_review(scope_rel: str, task_type: str | None = None) -> int:
                 f"orchestrator.py is the tool the role-holder uses, not the "
                 f"orchestrator itself.\n\n"
                 f"Either:\n"
-                f"  1. [cyan]python orchestrator.py take-role --scope {scope_rel} "
-                f"--as <participant>[/] then re-run review\n"
-                f"  2. (future) Surface the scope as an open question via "
+                f"  1. [cyan]python orchestrator.py offer-role --scope {scope_rel}[/]\n"
+                f"     then [cyan]accept-role --scope {scope_rel} --as <participant>[/]\n"
+                f"     then re-run review\n"
+                f"  2. Surface the scope as an open question via "
                 f"`synthesize`-style emergent transition and let participants "
                 f"self-select",
                 title="no orchestrator",
@@ -322,10 +324,15 @@ def run_review(scope_rel: str, task_type: str | None = None) -> int:
             console.print(
                 f"  [yellow]o[/] {author} refused: {entry.summary}"
             )
-        if entry.confidence < config["circuit_breakers"]["confidence_floor"]:
+        confidence_floor = config["circuit_breakers"]["confidence_floor"]
+        if entry.confidence < confidence_floor:
+            conf_failure = write_confidence_failure(
+                repo, scope_rel, entry, confidence_floor, role_holder,
+            )
             console.print(
-                f"  [yellow]! confidence breaker would fire (< "
-                f"{config['circuit_breakers']['confidence_floor']})[/]"
+                f"  [red]CONFIDENCE BREAKER FIRED[/] — {entry.author} reported "
+                f"{entry.confidence:.2f} < {confidence_floor}. "
+                f"Failure entry: {conf_failure.entry_id}"
             )
         results.append({
             "author": author,

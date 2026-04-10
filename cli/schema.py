@@ -29,8 +29,11 @@ VALID_VERDICTS = {
 }
 
 VALID_ROLE_ACTIONS = {
-    "take_orchestrator",
-    "release_orchestrator",
+    "offer_orchestrator",
+    "accept_orchestrator",
+    "refuse_orchestrator",
+    "rotate_orchestrator",
+    "stepdown_orchestrator",
 }
 
 VALID_SIGNAL_TYPES = {

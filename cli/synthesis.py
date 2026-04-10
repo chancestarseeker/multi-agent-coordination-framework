@@ -29,7 +29,7 @@ from cli.ledger import (
 from cli.retry import request_entry_with_retry, write_participant_failure
 from cli.roles import (
     current_orchestrator_for_scope,
-    write_release_orchestrator_role,
+    write_role_rotation,
 )
 
 
@@ -401,11 +401,12 @@ def run_synthesis(scope_rel: str) -> int:
                 f"Emergent Mode and surfaces a question to all participants. "
                 f"That transition is itself an orchestration decision — it "
                 f"requires a participant to be holding the role.\n\n"
-                f"Take the role first:\n"
-                f"  [cyan]python orchestrator.py take-role --scope {scope_rel} "
+                f"Offer and accept the role first:\n"
+                f"  [cyan]python orchestrator.py offer-role --scope {scope_rel}[/]\n"
+                f"  [cyan]python orchestrator.py accept-role --scope {scope_rel} "
                 f"--as <participant>[/]\n\n"
-                f"The role will be auto-released as part of the transition, since "
-                f"Emergent Mode has no role-holder.",
+                f"The role will be automatically rotated out as part of the "
+                f"transition, since Emergent Mode has no role-holder.",
                 title="no orchestrator",
                 border_style="red",
             )
@@ -491,18 +492,18 @@ def run_synthesis(scope_rel: str) -> int:
     )
 
     # The transition out of Orchestrated Mode means the role is no longer
-    # held — Emergent Mode is roleless. Auto-release as part of the
-    # transition. The release entry is authored by the role-holder
-    # themselves (their last act in the role on this scope).
-    release_entry = write_release_orchestrator_role(
+    # held — Emergent Mode is roleless. Field-triggered rotation as part
+    # of the mode transition. Per fnd-field.md, the role "can be rotated
+    # or released through the transition safeguards."
+    rotation_entry = write_role_rotation(
         repo, scope_rel, role_holder_decl,
         reason=(
-            f"Auto-released as part of the orchestrated -> emergent transition for "
-            f"synthesis (transition entry {transition_entry.entry_id})"
+            f"Mode transition: orchestrated -> emergent for synthesis "
+            f"(transition entry {transition_entry.entry_id})"
         ),
     )
     console.print(
-        f"[dim]role released: {release_entry.entry_id} (auto, transition to Emergent)[/]"
+        f"[dim]role rotated out: {rotation_entry.entry_id} (mode transition to Emergent)[/]"
     )
 
     console.print(
