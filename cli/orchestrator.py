@@ -43,6 +43,9 @@ from cli.roles import (
     cmd_offer_role, cmd_accept_role, cmd_refuse_role,
     cmd_stepdown, cmd_withdraw_offer, cmd_self_select,
 )
+from cli.resolution import (
+    cmd_resolve, cmd_object, cmd_withdraw_objection, cmd_reopen,
+)
 
 
 # ---------- Inbox subcommands ----------
@@ -311,6 +314,112 @@ def main() -> int:
         help="Optional: why this participant is picking up this scope",
     )
 
+    # ---------- Scope resolution subcommands ----------
+
+    p_resolve = sub.add_parser(
+        "resolve",
+        help="Propose resolution for a scope (validates no open blockers)",
+    )
+    p_resolve.add_argument(
+        "--scope",
+        required=True,
+        help="Path (relative to coordination/) of the scope being resolved",
+    )
+    p_resolve.add_argument(
+        "--as",
+        dest="as_participant",
+        required=True,
+        help="Identifier of the participant proposing resolution",
+    )
+    p_resolve.add_argument(
+        "--references",
+        default="",
+        help="Comma-separated entry IDs constituting the convergence evidence",
+    )
+    p_resolve.add_argument(
+        "--summary",
+        required=True,
+        help="Natural language description of what was converged on",
+    )
+
+    p_object = sub.add_parser(
+        "object",
+        help="Raise an objection that blocks resolution of a scope",
+    )
+    p_object.add_argument(
+        "--scope",
+        required=True,
+        help="Path (relative to coordination/) of the scope being objected within",
+    )
+    p_object.add_argument(
+        "--as",
+        dest="as_participant",
+        required=True,
+        help="Identifier of the participant raising the objection",
+    )
+    p_object.add_argument(
+        "--references",
+        default="",
+        help="Comma-separated entry IDs the objection is directed at",
+    )
+    p_object.add_argument(
+        "--reason",
+        required=True,
+        help="Why the participant is objecting",
+    )
+
+    p_withdraw_obj = sub.add_parser(
+        "withdraw-objection",
+        help="Withdraw a prior objection (only by the original author)",
+    )
+    p_withdraw_obj.add_argument(
+        "--scope",
+        required=True,
+        help="Path (relative to coordination/) of the scope",
+    )
+    p_withdraw_obj.add_argument(
+        "--as",
+        dest="as_participant",
+        required=True,
+        help="Identifier of the participant withdrawing (must be the objection author)",
+    )
+    p_withdraw_obj.add_argument(
+        "--references",
+        required=True,
+        help="Comma-separated objection entry ID(s) being withdrawn",
+    )
+    p_withdraw_obj.add_argument(
+        "--reason",
+        default="",
+        help="Optional: why the objection is being withdrawn",
+    )
+
+    p_reopen = sub.add_parser(
+        "reopen",
+        help="Reopen a previously resolved scope",
+    )
+    p_reopen.add_argument(
+        "--scope",
+        required=True,
+        help="Path (relative to coordination/) of the scope",
+    )
+    p_reopen.add_argument(
+        "--as",
+        dest="as_participant",
+        required=True,
+        help="Identifier of the participant reopening the scope",
+    )
+    p_reopen.add_argument(
+        "--references",
+        default="",
+        help="Comma-separated resolution entry ID(s) being reopened (defaults to current resolution)",
+    )
+    p_reopen.add_argument(
+        "--reason",
+        required=True,
+        help="Why the resolution is being revisited",
+    )
+
     p_ledger = sub.add_parser(
         "ledger",
         help="Print ledger entries (full panels by default; --summary for the compressed view)",
@@ -360,6 +469,18 @@ def main() -> int:
         return cmd_withdraw_offer(args.scope, args.reason)
     if args.cmd == "self-select":
         return cmd_self_select(args.scope, args.as_participant, args.reason)
+    if args.cmd == "resolve":
+        refs = [r.strip() for r in args.references.split(",") if r.strip()]
+        return cmd_resolve(args.scope, args.as_participant, refs, args.summary)
+    if args.cmd == "object":
+        refs = [r.strip() for r in args.references.split(",") if r.strip()]
+        return cmd_object(args.scope, args.as_participant, refs, args.reason)
+    if args.cmd == "withdraw-objection":
+        refs = [r.strip() for r in args.references.split(",") if r.strip()]
+        return cmd_withdraw_objection(args.scope, args.as_participant, refs, args.reason)
+    if args.cmd == "reopen":
+        refs = [r.strip() for r in args.references.split(",") if r.strip()]
+        return cmd_reopen(args.scope, args.as_participant, refs, args.reason)
     if args.cmd == "ledger":
         if args.summary:
             return print_ledger_summary(args.scope)

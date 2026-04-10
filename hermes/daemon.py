@@ -102,6 +102,12 @@ class Ledger:
         self.resource_totals: dict[str, dict] = defaultdict(
             lambda: {"tokens": 0, "cost_usd": 0.0, "tasks": 0}
         )
+        # Scope resolution state: scope -> resolution entry_id (latest unreopened)
+        self.scope_resolved: dict[str, str] = {}
+        # Active objections: objection entry_id -> dict with author, scope
+        self._objections: dict[str, dict] = {}
+        # Objections cleared by withdrawal or repair
+        self._cleared_objections: set[str] = set()
         self._schema = None
         self._load_schema()
         self._load_existing()
@@ -132,6 +138,7 @@ class Ledger:
         etype = entry.get("type")
         scope = entry.get("scope", "")
         author = entry.get("author", "")
+        entry_id = entry.get("entry_id", "")
 
         # Track resource snapshots
         rs = entry.get("resource_snapshot")
@@ -152,6 +159,28 @@ class Ledger:
             if "relinquish" in summary or "unowned" in summary or "departed" in summary:
                 self.scope_owners.pop(scope, None)
 
+        # Track scope resolution state
+        if etype == "resolution":
+            self.scope_resolved[scope] = entry_id
+        elif etype == "reopen":
+            for ref in entry.get("prior_entries", []):
+                # If the reopened resolution is the current one, clear it
+                if self.scope_resolved.get(scope) == ref:
+                    self.scope_resolved.pop(scope, None)
+
+        # Track objections
+        if etype == "objection":
+            self._objections[entry_id] = {"author": author, "scope": scope}
+        elif etype == "withdrawal":
+            for ref in entry.get("prior_entries", []):
+                obj = self._objections.get(ref)
+                if obj and obj["author"] == author:
+                    self._cleared_objections.add(ref)
+        elif etype == "repair":
+            for ref in entry.get("prior_entries", []):
+                if ref in self._objections:
+                    self._cleared_objections.add(ref)
+
     def validate(self, entry: dict) -> list[str]:
         """Validate an entry against the schema. Returns list of errors."""
         errors = []
@@ -171,7 +200,96 @@ class Ledger:
         if entry.get("entry_id") in self.entry_ids:
             errors.append(f"entry_id '{entry['entry_id']}' already exists")
 
+        etype = entry.get("type", "")
+        scope = entry.get("scope", "")
+
+        # Resolved scope enforcement: reject new attempts/completions on resolved scopes
+        if etype in ("attempt", "completion") and scope in self.scope_resolved:
+            errors.append(
+                f"Scope '{scope}' is resolved (resolution entry "
+                f"{self.scope_resolved[scope]}). New {etype} entries are "
+                f"rejected. Write a 'reopen' entry first."
+            )
+
+        # Resolution validation per fnd-ledger.md -> Scope Resolution
+        if etype == "resolution":
+            errors.extend(self._validate_resolution(scope))
+
+        # Withdrawal validation: author must match objection author
+        if etype == "withdrawal":
+            author = entry.get("author", "")
+            for ref in entry.get("prior_entries", []):
+                obj = self._objections.get(ref)
+                if obj is None:
+                    errors.append(
+                        f"Withdrawal references '{ref}' which is not an objection entry."
+                    )
+                elif obj["author"] != author:
+                    errors.append(
+                        f"Withdrawal author '{author}' does not match objection "
+                        f"'{ref}' author '{obj['author']}'. Only the original "
+                        f"author can withdraw an objection."
+                    )
+
         return errors
+
+    def _validate_resolution(self, scope: str) -> list[str]:
+        """Validate resolution entry per fnd-ledger.md -> Resolution Validation.
+
+        1. No open conflict breakers for the scope.
+        2. No active objections for the scope.
+        3. At least one verdict exists for the scope.
+        """
+        blockers = []
+
+        # Already resolved?
+        if scope in self.scope_resolved:
+            blockers.append(
+                f"Scope '{scope}' is already resolved (entry "
+                f"{self.scope_resolved[scope]}). Reopen it first."
+            )
+            return blockers
+
+        # 1. No open conflict breakers (failure entries without repair)
+        scope_failures = {}
+        repaired = set()
+        for e in self.entries:
+            if e.get("scope") != scope:
+                continue
+            if e.get("type") == "failure":
+                scope_failures[e["entry_id"]] = e
+            if e.get("type") == "repair":
+                for ref in e.get("prior_entries", []):
+                    repaired.add(ref)
+
+        for fid, f in scope_failures.items():
+            if fid not in repaired:
+                blockers.append(
+                    f"Open conflict breaker: failure {fid} "
+                    f"({f.get('summary', '')[:80]}) has no repair."
+                )
+
+        # 2. No active objections
+        for oid, obj in self._objections.items():
+            if obj["scope"] == scope and oid not in self._cleared_objections:
+                blockers.append(
+                    f"Active objection: {oid} by {obj['author']}."
+                )
+
+        # 3. At least one verdict exists
+        has_verdict = any(
+            e.get("scope") == scope
+            and e.get("type") == "completion"
+            and e.get("verdict") is not None
+            for e in self.entries
+        )
+        if not has_verdict:
+            blockers.append(
+                "No verdict exists for this scope. "
+                "An empty scope cannot be resolved."
+            )
+
+        return blockers
 
     def detect_conflict(self, entry: dict) -> Optional[dict]:
         """Check if this entry conflicts with a pending or recent entry on the same scope."""
@@ -252,7 +370,10 @@ class Ledger:
         - Preserve failure, repair, intention_shift, boundary_change in full.
         - Compress decision/attempt/completion to summary-only for closed scopes.
         """
-        PRESERVE_FULL = {"failure", "repair", "intention_shift", "boundary_change"}
+        PRESERVE_FULL = {
+            "failure", "repair", "intention_shift", "boundary_change",
+            "resolution", "objection", "withdrawal", "reopen",
+        }
         active_scopes = set(self.scope_owners.keys())
         summaries = []
         approx_chars = 0

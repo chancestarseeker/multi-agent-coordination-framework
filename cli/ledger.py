@@ -111,7 +111,10 @@ LEDGER_SUMMARY_SOFT_LIMIT_BYTES = 50_000
 #   - failure / repair carry the highest signal density for preventing
 #     repeated mistakes
 #   - intention_shift / boundary_change define current operating conditions
-_PRESERVE_IN_FULL = {"failure", "repair", "intention_shift", "boundary_change"}
+_PRESERVE_IN_FULL = {
+    "failure", "repair", "intention_shift", "boundary_change",
+    "resolution", "objection", "withdrawal", "reopen",
+}
 
 
 def summarize_ledger(
